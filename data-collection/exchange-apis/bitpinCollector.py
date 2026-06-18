@@ -1,8 +1,8 @@
 """
 Bitpin LOB & Trade Data Collector
 ====================================
-Collects order book (depth 20) and recent trades for BTC_IRT and USDT_IRT
-every 10 seconds. Press Ctrl+C to stop.
+Collects order book (depth 20) and recent trades for BTC_IRT, USDT_IRT,
+ETH_IRT, BNB_IRT and XRP_IRT every 10 seconds. Press Ctrl+C to stop.
 
 API docs: https://docs.bitpin.ir/
 Base URL:  https://api.bitpin.ir  (also api.bitpin.org)
@@ -14,8 +14,14 @@ Endpoints used (no auth required):
 Output files (in bitpin_data/ folder):
   - BTC_IRT_orderbook.csv
   - USDT_IRT_orderbook.csv
+  - ETH_IRT_orderbook.csv
+  - BNB_IRT_orderbook.csv
+  - XRP_IRT_orderbook.csv
   - BTC_IRT_trades.csv
   - USDT_IRT_trades.csv
+  - ETH_IRT_trades.csv
+  - BNB_IRT_trades.csv
+  - XRP_IRT_trades.csv
 """
 
 import requests
@@ -25,7 +31,7 @@ import os
 from datetime import datetime, timezone
 
 # Config
-SYMBOLS      = ["BTC_IRT", "USDT_IRT"]
+SYMBOLS      = ["BTC_IRT", "USDT_IRT", "ETH_IRT", "BNB_IRT", "XRP_IRT"]
 INTERVAL_SEC = 10
 LOB_DEPTH    = 20
 BASE_URL     = "https://api.bitpin.org/api"
@@ -178,7 +184,7 @@ def collect_once():
 
 def main():
     print("=" * 55)
-    print("  Bitpin Collector — BTC_IRT & USDT_IRT")
+    print("  Bitpin Collector — BTC_IRT, USDT_IRT, ETH_IRT, BNB_IRT & XRP_IRT")
     print(f"  Interval : {INTERVAL_SEC}s   |   LOB depth : {LOB_DEPTH}")
     print(f"  Output   : ./{OUTPUT_DIR}/")
     print("  Press Ctrl+C to stop.")

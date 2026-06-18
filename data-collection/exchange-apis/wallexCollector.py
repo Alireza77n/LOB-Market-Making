@@ -1,8 +1,8 @@
 """
 Wallex LOB & Trade Data Collector
 ====================================
-Collects order book (depth 20) and recent trades for BTCTMN and USDTTMN
-every 10 seconds. Press Ctrl+C to stop.
+Collects order book (depth 20) and recent trades for BTCTMN, USDTTMN,
+ETHTMN, BNBTMN and XRPTMN every 10 seconds. Press Ctrl+C to stop.
 
 API docs: https://api-docs.wallex.ir/
 Base URL:  https://api.wallex.ir
@@ -14,8 +14,14 @@ Endpoints used (no auth required):
 Output files (in wallex_data/ folder):
   - BTCTMN_orderbook.csv
   - USDTTMN_orderbook.csv
+  - ETHTMN_orderbook.csv
+  - BNBTMN_orderbook.csv
+  - XRPTMN_orderbook.csv
   - BTCTMN_trades.csv
   - USDTTMN_trades.csv
+  - ETHTMN_trades.csv
+  - BNBTMN_trades.csv
+  - XRPTMN_trades.csv
 """
 
 import requests
@@ -25,7 +31,7 @@ import os
 from datetime import datetime, timezone
 
 # Config
-SYMBOLS      = ["BTCTMN", "USDTTMN"]   # BTC/Toman and USDT/Toman
+SYMBOLS      = ["BTCTMN", "USDTTMN", "ETHTMN", "BNBTMN", "XRPTMN"]   # BTC/USDT/ETH/BNB/XRP vs Toman
 INTERVAL_SEC = 10
 LOB_DEPTH    = 20
 BASE_URL     = "https://api.wallex.ir"
@@ -178,7 +184,7 @@ def collect_once():
 
 def main():
     print("=" * 55)
-    print("  Wallex Collector — BTCTMN & USDTTMN")
+    print("  Wallex Collector — BTCTMN, USDTTMN, ETHTMN, BNBTMN & XRPTMN")
     print(f"  Interval : {INTERVAL_SEC}s   |   LOB depth : {LOB_DEPTH}")
     print(f"  Output   : ./{OUTPUT_DIR}/")
     print("  Press Ctrl+C to stop.")

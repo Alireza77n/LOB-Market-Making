@@ -1,8 +1,8 @@
 """
 Tabdeal LOB & Trade Data Collector
 ====================================
-Collects order book (depth 20) and recent trades for BTCIRT and USDTIRT
-every 10 seconds. Press Ctrl+C to stop.
+Collects order book (depth 20) and recent trades for BTCIRT, USDTIRT,
+ETHIRT, BNBIRT and XRPIRT every 10 seconds. Press Ctrl+C to stop.
 
 API docs: https://docs.tabdeal.org/
 Base URL:  https://api1.tabdeal.org
@@ -16,8 +16,14 @@ Symbol format: use tabdealSymbol with underscore e.g. BTCIRT, USDTIRT
 Output files (in tabdeal_data/ folder):
   - BTCIRT_orderbook.csv
   - USDTIRT_orderbook.csv
+  - ETHIRT_orderbook.csv
+  - BNBIRT_orderbook.csv
+  - XRPIRT_orderbook.csv
   - BTCIRT_trades.csv
   - USDTIRT_trades.csv
+  - ETHIRT_trades.csv
+  - BNBIRT_trades.csv
+  - XRPIRT_trades.csv
 """
 
 import requests
@@ -27,7 +33,7 @@ import os
 from datetime import datetime, timezone
 
 # Config
-SYMBOLS      = ["BTCIRT", "USDTIRT"]
+SYMBOLS      = ["BTCIRT", "USDTIRT", "ETHIRT", "BNBIRT", "XRPIRT"]
 INTERVAL_SEC = 10
 LOB_DEPTH    = 20
 BASE_URL     = "https://api1.tabdeal.org"
@@ -180,7 +186,7 @@ def collect_once():
 
 def main():
     print("=" * 55)
-    print("  Tabdeal Collector — BTCIRT & USDTIRT")
+    print("  Tabdeal Collector — BTCIRT, USDTIRT, ETHIRT, BNBIRT & XRPIRT")
     print(f"  Interval : {INTERVAL_SEC}s   |   LOB depth : {LOB_DEPTH}")
     print(f"  Output   : ./{OUTPUT_DIR}/")
     print("  Press Ctrl+C to stop.")

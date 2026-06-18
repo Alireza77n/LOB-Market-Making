@@ -5,17 +5,17 @@ Each collector polls its exchange every 10 seconds and appends to CSV files.
 
 ## Structure
 
-| File                    | Exchange  | Symbols              | Output dir       |
-|-------------------------|-----------|----------------------|------------------|
-| `nobitexCollector.py`   | Nobitex   | BTCIRT, USDTIRT      | `nobitex_data/`  |
-| `bitpinCollector.py`    | Bitpin    | BTC_IRT, USDT_IRT    | `bitpin_data/`   |
-| `wallexCollector.py`    | Wallex    | BTCTMN, USDTTMN      | `wallex_data/`   |
-| `ramzinexCollector.py`  | Ramzinex  | BTC_IRT, USDT_IRT    | `ramzinex_data/` |
-| `tabdealCollector.py`   | Tabdeal   | BTCIRT, USDTIRT      | `tabdeal_data/`  |
+| File                    | Exchange  | Symbols                                              | Output dir       |
+|-------------------------|-----------|-------------------------------------------------------|------------------|
+| `nobitexCollector.py`   | Nobitex   | BTCIRT, USDTIRT, ETHIRT, BNBIRT, XRPIRT                | `nobitex_data/`  |
+| `bitpinCollector.py`    | Bitpin    | BTC_IRT, USDT_IRT, ETH_IRT, BNB_IRT, XRP_IRT           | `bitpin_data/`   |
+| `wallexCollector.py`    | Wallex    | BTCTMN, USDTTMN, ETHTMN, BNBTMN, XRPTMN                | `wallex_data/`   |
+| `ramzinexCollector.py`  | Ramzinex  | BTC_IRT, USDT_IRT, ETH_IRT, BNB_IRT, XRP_IRT           | `ramzinex_data/` |
+| `tabdealCollector.py`   | Tabdeal   | BTCIRT, USDTIRT, ETHIRT, BNBIRT, XRPIRT                | `tabdeal_data/`  |
 
 ## Output files
 
-Each collector writes four CSV files per run:
+Each collector writes two CSV files per symbol (10 files per run — all five exchanges now track 5 symbols each):
 
 ```
 {exchange}_data/

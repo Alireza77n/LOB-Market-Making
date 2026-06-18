@@ -1,12 +1,15 @@
 """
 Ramzinex LOB & Trade Data Collector
 ====================================
-Collects order book (depth 20) and recent trades for BTC/IRT and USDT/IRT
-every 10 seconds. Press Ctrl+C to stop.
+Collects order book (depth 20) and recent trades for BTC/IRT, USDT/IRT,
+ETH/IRT, BNB/IRT and XRP/IRT every 10 seconds. Press Ctrl+C to stop.
 
 Pair IDs are hardcoded from the currencies endpoint:
-  BTC  / IRT  → pair_id = 2   (bitcoin rial_related_pair)
-  USDT / IRT  → pair_id = 11  (tether  rial_related_pair)
+  BTC  / IRT  → pair_id = 2    (bitcoin  rial_related_pair)
+  USDT / IRT  → pair_id = 11   (tether   rial_related_pair)
+  ETH  / IRT  → pair_id = 3    (ethereum rial_related_pair)
+  BNB  / IRT  → pair_id = 17   (bnb      rial_related_pair)
+  XRP  / IRT  → pair_id = 4    (ripple   rial_related_pair)
 
 Endpoints (no auth required):
   GET https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/orderbooks/{pair_id}/buys_sells
@@ -22,6 +25,12 @@ Output files (in ramzinex_data/):
   BTC_IRT_trades.csv
   USDT_IRT_orderbook.csv
   USDT_IRT_trades.csv
+  ETH_IRT_orderbook.csv
+  ETH_IRT_trades.csv
+  BNB_IRT_orderbook.csv
+  BNB_IRT_trades.csv
+  XRP_IRT_orderbook.csv
+  XRP_IRT_trades.csv
 """
 
 import requests
@@ -35,6 +44,9 @@ from datetime import datetime, timezone
 PAIRS = {
     "BTC_IRT":  2,
     "USDT_IRT": 11,
+    "ETH_IRT":  3,
+    "BNB_IRT":  17,
+    "XRP_IRT":  4,
 }
 SYMBOLS      = list(PAIRS.keys())
 INTERVAL_SEC = 10
@@ -241,7 +253,7 @@ def collect_once():
 
 def main():
     print("=" * 55)
-    print("  Ramzinex Collector — BTC_IRT & USDT_IRT")
+    print("  Ramzinex Collector — BTC_IRT, USDT_IRT, ETH_IRT, BNB_IRT & XRP_IRT")
     print(f"  Interval : {INTERVAL_SEC}s   |   LOB depth : {LOB_DEPTH}")
     print(f"  Output   : ./{OUTPUT_DIR}/")
     print("  Press Ctrl+C to stop.")

@@ -1,14 +1,20 @@
 """
 Nobitex LOB & Trade Data Collector
 ====================================
-Collects order book (depth 20) and recent trades for BTCIRT and USDTIRT
-every 10 seconds.
+Collects order book (depth 20) and recent trades for BTCIRT, USDTIRT,
+ETHIRT, BNBIRT and XRPIRT every 10 seconds.
 
 Output files (in nobitex_data/ folder):
   - BTCIRT_orderbook.csv
   - USDTIRT_orderbook.csv
+  - ETHIRT_orderbook.csv
+  - BNBIRT_orderbook.csv
+  - XRPIRT_orderbook.csv
   - BTCIRT_trades.csv
   - USDTIRT_trades.csv
+  - ETHIRT_trades.csv
+  - BNBIRT_trades.csv
+  - XRPIRT_trades.csv
 """
 
 import requests
@@ -18,7 +24,7 @@ import os
 from datetime import datetime, timezone
 
 # Config
-SYMBOLS      = ["BTCIRT", "USDTIRT"]
+SYMBOLS      = ["BTCIRT", "USDTIRT", "ETHIRT", "BNBIRT", "XRPIRT"]
 INTERVAL_SEC = 10
 LOB_DEPTH    = 20
 BASE_URL     = "https://apiv2.nobitex.ir"
@@ -163,7 +169,7 @@ def collect_once():
 
 def main():
     print("=" * 55)
-    print("  Nobitex Collector — BTCIRT & USDTIRT")
+    print("  Nobitex Collector — BTCIRT, USDTIRT, ETHIRT, BNBIRT & XRPIRT")
     print(f"  Interval : {INTERVAL_SEC}s   |   LOB depth : {LOB_DEPTH}")
     print(f"  Output   : ./{OUTPUT_DIR}/")
     print("=" * 55)
