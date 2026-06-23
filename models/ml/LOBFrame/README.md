@@ -112,6 +112,9 @@ A few notes on how it differs from the upstream layout:
   Iranian-exchange order-book CSV directly into LOBFrame's *processed* format (the
   `scaled_data` / `unscaled_data` splits), so the LOBSTER-only `data_processing` stage
   is bypassed and there is no `raw_data` / message-file step for this data.
+- Feature normalization is selectable across three methods (`global`, `rolling_1`,
+  `rolling_5`) via `data_processing/normalization.py`; see
+  [Feature normalization](#feature-normalization) below.
 - `torch_datasets/` is keyed by `threshold_<thr>/batch_size_<bs>/training_<sym>_test_<sym>/<horizon>/`
   (one cache per symbol/horizon), so different exchanges/symbols never collide.
 - Per-run outputs land in `loggers/results/<experiment_id>/` (checkpoint, `metrics.csv`,
@@ -133,6 +136,7 @@ A few notes on how it differs from the upstream layout:
 │             └── validation
 ├── data_processing
 │   ├── convert_exchange_data.py            # exchange CSV -> processed LOBFrame format (auto-detects book convention)
+│   ├── normalization.py                    # shared z-score methods (global / rolling_1 / rolling_5) + interactive selector
 │   ├── data_process.py                     # LOBSTER-only (unused with exchange data)
 │   ├── data_process_utils.py
 │   └── complete_homological_utils.py
@@ -237,8 +241,10 @@ must be consistent across all three steps.
 ```bash
 # Step A — convert the exchange CSV into LOBFrame's processed format (book convention auto-detected).
 #          --clean wipes any previous split for THIS dataset folder first.
+#          --normalization picks the z-score scheme; omit it to be asked interactively
+#          (see "Feature normalization" below). global is the safe default for low volume.
 ./.venv/Scripts/python.exe data_processing/convert_exchange_data.py \
-  --input_csv "<CSV>" --symbol "<SYM>" --horizons "10,50,100" --clean
+  --input_csv "<CSV>" --symbol "<SYM>" --horizons "10,50,100" --normalization global --clean
 
 # Step B — build the torch datasets. This prints/creates a NEW experiment_id folder under
 #          loggers/results/ ; note it (it is "<SYM>_<MODEL>_<timestamp>_<rand>").
@@ -254,6 +260,30 @@ must be consistent across all three steps.
   --horizons "10,50,100" --prediction_horizon 10 \
   --stages "training,evaluation" --num_workers 0 --epochs 30 --patience 6
 ```
+
+### Feature normalization
+
+Step A z-scores the 40 order-book features (labels are **never** normalized). Choose the
+scheme with `--normalization {global,rolling_1,rolling_5}`; if the flag is omitted you are
+asked **interactively** — first which data you're using, then (for exchange data) which
+method. Selecting LOBSTER auto-uses the original 5-day scheme without a second question.
+
+| Method | What it does | Use when |
+| --- | --- | --- |
+| `global` *(default)* | Single z-score whose `mu`/`sigma` are fit on the **training portion only** (the first `--training_ratio` of rows, chronologically) and applied unchanged to validation/test. No look-ahead; drops no warm-up days. | **Low-volume** data — keeps the most samples. Does not adapt to drift over a long test period. |
+| `rolling_1` | 1-day rolling z-score: each calendar day is normalized by the **previous 1 day**. Drops the first day. | **Moderate-volume** data; adapts quickly to drift. |
+| `rolling_5` | Original LOBFrame scheme: each calendar day normalized by the **previous 5 days**. Drops the first 5 days. | **High-volume** data where 5 days is a stable estimate and per-day drift matters. |
+
+Notes:
+- The rolling methods are **causal** (only ever use strictly earlier calendar days), so
+  they are applied across the whole dataset *before* the chronological split; warm-up days
+  are dropped first and the train/val/test split is recomputed on the survivors. With short
+  collections `rolling_5` can discard a large fraction of days — prefer `global` there.
+- `global` fits its statistics on the training rows only, so there is **no train/test
+  leakage**; its one weakness is staleness if the market drifts, which hurts (not inflates)
+  test performance. The rolling methods exist for that case.
+- The unscaled copy in `unscaled_data/` always keeps raw integer prices/volumes (the
+  backtest needs them) and is restricted to the same surviving rows as the scaled copy.
 
 **Worked example — DeepLOB on nobitex BTC:**
 

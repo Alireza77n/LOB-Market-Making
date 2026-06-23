@@ -41,17 +41,42 @@ Each processed CSV has columns, in this exact order:
 
 Normalization
 -------------
-Per-symbol z-score using statistics computed ONLY on the training portion (no
-look-ahead). The same mean/std are applied to validation and test. Unscaled copies
-keep the raw integer prices/volumes (needed for the backtest price reconstruction).
+Three selectable feature z-score methods (labels are never normalized). Pass
+`--normalization {global,rolling_1,rolling_5}`; if omitted you are asked interactively
+(first which data type, then — for exchange data — which method). See
+data_processing/normalization.py for the shared definitions and prompts.
+
+  * global    - Single per-symbol z-score with mean/std from the TRAINING portion only
+                (no look-ahead), applied unchanged to validation/test. Best for LOW-volume
+                data: no warm-up days dropped.
+  * rolling_1 - 1-day rolling z-score: each calendar day normalized by the previous 1 day.
+                Drops the first day. For MODERATE-volume data.
+  * rolling_5 - Original LOBFrame 5-day rolling z-score: each calendar day normalized by
+                the previous 5 days. Drops the first 5 days. For HIGH-volume data.
+
+Rolling methods are causal (only use strictly earlier calendar days), so they are applied
+across the whole dataset before the chronological train/val/test split; warm-up days are
+dropped first and the split is recomputed on the survivors. Unscaled copies keep the raw
+integer prices/volumes (needed for the backtest price reconstruction) and are restricted
+to the same surviving rows as the scaled copy.
 """
 
 import argparse
 import os
 import shutil
+import sys
 
 import numpy as np
 import pandas as pd
+
+# This script is intended to be run directly (python data_processing/convert_exchange_data.py)
+# from the repo root, which puts data_processing/ on sys.path[0] rather than the repo root.
+# Add the repo root so the shared `data_processing.normalization` module resolves either way.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from data_processing import normalization as norm
 
 LEVELS = 10  # LOBFrame's fixed feature width is 4 * 10 = 40.
 
@@ -169,6 +194,52 @@ def make_labels(mid: np.ndarray, horizons: list[int]) -> dict[str, np.ndarray]:
     return labels
 
 
+def rolling_zscore_by_day(
+    df: pd.DataFrame, fnames: list[str], window_days: int
+) -> pd.DataFrame:
+    """Apply LOBFrame-style rolling z-score over CALENDAR DAYS, in place semantics
+    returning a copy of `df` with `fnames` scaled and warm-up days removed.
+
+    Each day d is normalized using the mean/std pooled over the previous `window_days`
+    calendar days (days d-window..d-1), matching data_process.py's dynamic z-score
+    (which pools per-day means/mean-of-squares weighted by sample count). The first
+    `window_days` days have insufficient history and are DROPPED.
+
+    This is causal: a row is only ever normalized using strictly earlier days, so it is
+    safe to run across the whole dataset before the train/val/test split.
+    """
+    df = df.copy()
+    day_key = pd.to_datetime(df["time"]).dt.date
+    ordered_days = sorted(day_key.unique())
+
+    feats = df[fnames].astype(np.float64)
+    # Per-day pooled statistics: count, sum, sum of squares.
+    grp = feats.groupby(day_key)
+    day_count = grp.size()
+    day_sum = grp.sum()
+    day_sumsq = (feats ** 2).groupby(day_key).sum()
+
+    keep_mask = pd.Series(False, index=df.index)
+    scaled = feats.copy()
+    for i, day in enumerate(ordered_days):
+        if i < window_days:
+            continue  # Not enough history -> drop this day.
+        prev_days = ordered_days[i - window_days:i]
+        n = day_count.loc[prev_days].sum()
+        s = day_sum.loc[prev_days].sum()
+        ss = day_sumsq.loc[prev_days].sum()
+        mu = s / n
+        var = ss / n - mu ** 2
+        sigma = np.sqrt(var.clip(lower=0)).replace(0, 1.0)
+
+        rows = day_key == day
+        scaled.loc[rows, fnames] = (feats.loc[rows, fnames] - mu) / sigma
+        keep_mask.loc[rows] = True
+
+    df[fnames] = scaled
+    return df.loc[keep_mask].reset_index(drop=True)
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Convert an Iranian-exchange order-book CSV (Nobitex/Bitpin/Ramzinex/"
@@ -180,7 +251,19 @@ def main():
     p.add_argument("--training_ratio", type=float, default=0.6)
     p.add_argument("--validation_ratio", type=float, default=0.2)
     p.add_argument("--clean", action="store_true", help="Wipe existing split folders for this dataset first")
+    p.add_argument(
+        "--normalization", default=None,
+        help="Feature normalization method: 'global' (single train-set z-score), "
+             "'rolling_1' (1-day rolling z-score), or 'rolling_5' (original LOBFrame "
+             "5-day rolling z-score). If omitted, you'll be asked interactively.",
+    )
     args = p.parse_args()
+
+    # Resolve the normalization method. If --normalization was not passed, ask which data
+    # type is being used; LOBSTER auto-selects the 5-day rolling, exchange data prompts
+    # for one of the 3 methods.
+    method = norm.resolve_for_exchange(args.normalization, interactive=True)
+    print(f"Normalization method: {method} -> {norm.describe(method)}")
 
     horizons = [int(h) for h in args.horizons.split(",")]
     fnames = feature_names(LEVELS)
@@ -207,28 +290,57 @@ def main():
     for col, vals in labels.items():
         df[col] = vals
 
-    # Chronological split.
-    n = len(df)
-    n_train = int(n * args.training_ratio)
-    n_val = int(n * args.validation_ratio)
-    splits = {
-        "training": df.iloc[:n_train].copy(),
-        "validation": df.iloc[n_train:n_train + n_val].copy(),
-        "test": df.iloc[n_train + n_val:].copy(),
-    }
-    print(f"Split sizes -> training: {len(splits['training'])}, "
-          f"validation: {len(splits['validation'])}, test: {len(splits['test'])}")
-
-    # Per-symbol z-score stats from the TRAINING portion only (no look-ahead).
-    train_feats = splits["training"][fnames]
-    mu = train_feats.mean()
-    sigma = train_feats.std().replace(0, 1.0)  # guard against zero-variance columns
-
     label_cols = [f"Raw_Target_{h}" for h in horizons] + [f"Smooth_Target_{h}" for h in horizons]
     ordered_cols = ["seconds"] + fnames + label_cols
 
+    # ------------------------------------------------------------------ scaling
+    # Build the SCALED feature frame for the whole dataset according to `method`.
+    #   * global    : single mean/std from the TRAINING portion only (no look-ahead).
+    #   * rolling_*  : causal per-calendar-day z-score using the previous N days; warm-up
+    #                  days are dropped (so the chronological split is recomputed AFTER).
+    # The UNSCALED copy always keeps raw integer prices/volumes (needed for the backtest
+    # price reconstruction), and is restricted to the same surviving rows as the scaled one.
+    df_unscaled = df.copy()
+    if method == "global":
+        n = len(df)
+        n_train = int(n * args.training_ratio)
+        train_feats = df[fnames].iloc[:n_train]
+        mu = train_feats.mean()
+        sigma = train_feats.std().replace(0, 1.0)  # guard against zero-variance columns
+        df_scaled = df.copy()
+        df_scaled[fnames] = (df[fnames].astype(np.float64) - mu) / sigma
+    else:
+        window_days = norm.ROLLING_WINDOWS[method]
+        df_scaled = rolling_zscore_by_day(df, fnames, window_days)
+        # Keep the unscaled copy aligned to the rows that survived warm-up dropping.
+        surviving = pd.to_datetime(df_scaled["time"])
+        survive_days = set(surviving.dt.date.unique())
+        df_unscaled = df_unscaled[
+            pd.to_datetime(df_unscaled["time"]).dt.date.isin(survive_days)
+        ].reset_index(drop=True)
+        print(f"Rolling {window_days}-day z-score dropped "
+              f"{len(df) - len(df_scaled)} warm-up rows; {len(df_scaled)} remain.")
+
+    # ------------------------------------------------------------------ split
+    # Chronological split AFTER scaling, so warm-up drops don't skew the ratios.
+    def chrono_split(frame):
+        n = len(frame)
+        n_train = int(n * args.training_ratio)
+        n_val = int(n * args.validation_ratio)
+        return {
+            "training": frame.iloc[:n_train].copy(),
+            "validation": frame.iloc[n_train:n_train + n_val].copy(),
+            "test": frame.iloc[n_train + n_val:].copy(),
+        }
+
+    scaled_splits = chrono_split(df_scaled)
+    unscaled_splits = chrono_split(df_unscaled)
+    print(f"Split sizes -> training: {len(scaled_splits['training'])}, "
+          f"validation: {len(scaled_splits['validation'])}, test: {len(scaled_splits['test'])}")
+
+    # ------------------------------------------------------------------ write
     base = f"./data/{args.dataset}"
-    for scaled in (True, False):
+    for scaled, splits in ((True, scaled_splits), (False, unscaled_splits)):
         root = f"{base}/{'scaled_data' if scaled else 'unscaled_data'}"
         for stage in ("training", "validation", "test"):
             folder = f"{root}/{stage}"
@@ -244,11 +356,6 @@ def main():
             # keeps it verbatim for plotting/backtest indexing).
             part.insert(0, "seconds", part["time"].astype(str))
 
-            feat_block = part[fnames].astype(np.float64)
-            if scaled:
-                feat_block = (feat_block - mu) / sigma
-            part[fnames] = feat_block
-
             out = part[ordered_cols]
             # One file per calendar day so the loader's per-file logic behaves naturally.
             part_dates = pd.to_datetime(part["time"]).dt.date
@@ -258,7 +365,8 @@ def main():
                 day_df.to_csv(fname, index=False)
                 print(f"  wrote {fname} ({len(day_df)} rows)")
 
-    print("Done. Feature columns:", len(fnames), "| label columns:", len(label_cols))
+    print(f"Done. Method: {method} | feature columns:", len(fnames),
+          "| label columns:", len(label_cols))
 
 
 if __name__ == "__main__":
