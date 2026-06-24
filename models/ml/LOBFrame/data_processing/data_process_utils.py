@@ -4,12 +4,13 @@ from data_processing import data_process
 
 
 class DataUtils:
-    def __init__(self, ticker, dataset, experiment_id, horizons, normalization_window):
+    def __init__(self, ticker, dataset, experiment_id, horizons, normalization_window, data_representation="lob"):
         self.ticker = ticker  # Ticker of the stock to be processed.
         self.dataset = dataset  # Dataset to be used.
         self.experiment_id = experiment_id  # Experiment ID.
         self.horizons = horizons  # Horizons to be used when computing labels.
         self.normalization_window = normalization_window  # Normalization window to be used when normalizing data.
+        self.data_representation = data_representation  # Data representation to run with ("lob" or "ofi").
 
         self.__raw_data_path = None  # Path containing the raw LOB data.
         self.__processed_data_path_unscaled_data = (
@@ -72,6 +73,7 @@ class DataUtils:
             logs_path=self.__logs_path,
             horizons=self.horizons,
             normalization_window=self.normalization_window,
+            data_representation=self.data_representation,
             scaling=False,
         )
 
@@ -82,5 +84,6 @@ class DataUtils:
             logs_path=self.__logs_path,
             horizons=self.horizons,
             normalization_window=self.normalization_window,
+            data_representation=self.data_representation,
             scaling=True,
         )

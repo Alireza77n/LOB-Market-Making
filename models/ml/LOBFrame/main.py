@@ -8,6 +8,7 @@ from utils import (
     save_dataset_info,
     parse_args,
     create_hyperparameters_yaml,
+    prompt_data_representation,
 )
 from data_processing.complete_homological_utils import get_complete_homology
 
@@ -19,6 +20,11 @@ if __name__ == "__main__":
     if args.experiment_id is None:
         # If no experiment ID is passed, generate a new one.
         experiment_id = logger.generate_id(args.model, args.target_stocks)
+        # Ask the user which type of data to run with, unless it was passed on the CLI.
+        # This choice ("lob" or "ofi") is persisted in hyperparameters.yaml so that all
+        # subsequent stages (and cached torch datasets) use a consistent representation.
+        if args.data_representation is None:
+            args.data_representation = prompt_data_representation()
         # Create a new configuration file containing the hyperparameters.
         create_hyperparameters_yaml(experiment_id, args)
     else:
@@ -56,6 +62,7 @@ if __name__ == "__main__":
                 experiment_id=experiment_id,
                 horizons=general_hyperparameters["horizons"],
                 normalization_window=general_hyperparameters["normalization_window"],
+                data_representation=general_hyperparameters.get("data_representation", "lob"),
             )
             # Generate the data folders.
             data_utils.generate_data_folders()

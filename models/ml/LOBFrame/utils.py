@@ -285,6 +285,7 @@ def get_best_levels_prices_and_labels(
     all_horizons: list[int],
     prediction_horizon: int,
     threshold: float,
+    data_representation: str = "lob",
 ) -> tuple[Any, ...]:
     """
     Get the best levels (bid and ask) prices and the corresponding discretized labels.
@@ -294,25 +295,25 @@ def get_best_levels_prices_and_labels(
         all_horizons (list): List all horizons computed in the preprocessing stage.
         prediction_horizon (int): Horizon to be considered.
         threshold (float): Threshold to be used to discretize the labels.
+        data_representation (str): "lob" (40 features) or "ofi" (50 features). Determines
+            the column offset at which the label columns start in each processed CSV.
 
     Returns:
         A tuple containing the best levels (bid and ask) prices and the corresponding discretized labels.
     """
+    # The label for the requested horizon is identified by NAME ('Raw_Target_<h>') rather
+    # than by a fixed column offset. This keeps the reader robust to the data
+    # representation: 'lob' has 40 feature columns, 'ofi' has 10, and the unscaled 'ofi'
+    # files additionally carry ASKp1/BIDp1 for the backtest. This matches the original
+    # behaviour, which sliced the label block (Raw_* first) and indexed it by the position
+    # of `prediction_horizon` within `all_horizons`.
+    raw_label_column = f"Raw_Target_{prediction_horizon}"
 
     # List the test files.
     test_files = sorted(glob.glob(f"./data/{dataset}/unscaled_data/test/*{target_stocks[0]}*.csv"))
 
     best_levels_prices = pd.DataFrame()
 
-    # Get the position of the prediction horizon in the list of all horizons.
-    position = next(
-        (
-            index
-            for index, value in enumerate(all_horizons)
-            if value == prediction_horizon
-        ),
-        None,
-    )
     all_labels_temp = []
 
     for file in test_files:
@@ -320,10 +321,8 @@ def get_best_levels_prices_and_labels(
         df = pd.read_csv(file).iloc[history_length:, :]
         # Reset the index.
         df.reset_index(drop=True, inplace=True)
-        # Get all the labels.
-        label_df = df.iloc[:, 41:]
-        # Get the label corresponding to the prediction horizon.
-        label = label_df.iloc[:, position]
+        # Get the (raw) label corresponding to the prediction horizon, selected by name.
+        label = df[raw_label_column]
         # Get the best levels (ask and bid) prices and the datetime corresponding to each tick.
         best_levels_prices = pd.concat(
             [best_levels_prices, df[["seconds", "ASKp1", "BIDp1"]]]
@@ -392,6 +391,22 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
+def prompt_data_representation() -> str:
+    """
+    Interactively ask the user which type of data the framework should run with
+    ("lob" raw limit order book, or "ofi" LOB + multilevel Order Flow Imbalance).
+
+    Delegates to the shared selector in data_processing.normalization so that both
+    ingestion paths (LOBSTER and exchange) present an identical prompt and accept the
+    same canonical names/aliases.
+
+    Returns:
+        The selected representation, one of ("lob", "ofi").
+    """
+    from data_processing import normalization as norm
+    return norm.prompt_for_data_representation(default="lob")
 
 
 def parse_args() -> Any:
@@ -482,6 +497,15 @@ def parse_args() -> Any:
         type=str,
         default='raw',
         help="Type of targets to be used (i.e. smooth, raw).",
+    )
+    parser.add_argument(
+        "--data_representation",
+        type=str,
+        default=None,
+        choices=["lob", "ofi"],
+        help="Type of data to run with: 'lob' (raw limit order book) or 'ofi' "
+             "(raw LOB + multilevel Order Flow Imbalance). If omitted, the framework "
+             "asks interactively when a new experiment is created.",
     )
 
     # Model hyperparameters
@@ -624,6 +648,7 @@ def create_hyperparameters_yaml(experiment_id: str, args: Any) -> None:
             "stages": stages,
             "include_target_stock_in_training": args.include_target_stock_in_training,
             "targets_type": args.targets_type,
+            "data_representation": args.data_representation,
         },
         "model": {
             "batch_size": args.batch_size,

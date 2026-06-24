@@ -168,6 +168,85 @@ def prompt_for_data_type(default: str = "exchange") -> str:
         print(f"  Unknown data type {choice!r}. Choose one of: {', '.join(DATA_TYPES)}.")
 
 
+# ---------------------------------------------------------------------------
+# Data-representation selection (raw LOB vs. Order Flow Imbalance)
+# ---------------------------------------------------------------------------
+# Independently of the data SOURCE and the normalization METHOD, the framework can run
+# with two feature representations:
+#   * "lob" : raw limit order book features only (40 columns: 4 fields x 10 levels).
+#             This is the framework's historical behaviour.
+#   * "ofi" : multilevel Order Flow Imbalance features (1 OFI column per level, i.e. 10
+#             columns) used as the ONLY model features, REPLACING the 40 raw LOB columns.
+#             OFI per level = bid order flow - ask order flow (Cont et al.). The 10 OFI
+#             columns are z-scored on their own. (ASKp1/BIDp1 are retained only in the
+#             unscaled files so the backtest can still reconstruct trade prices.)
+DATA_REPRESENTATIONS = ("lob", "ofi")
+
+DATA_REPRESENTATION_DESCRIPTIONS = {
+    "lob": "Raw limit order book data (40 features). Original framework behaviour.",
+    "ofi": "Pure multilevel Order Flow Imbalance (10 features), replacing raw LOB. "
+           "OFI per level = bid order flow - ask order flow (Cont et al.). Field-standard; "
+           "use with a sequence/feature model (transformer, dla, cnn1), not the LOB CNNs.",
+}
+
+
+def normalize_representation_arg(value):
+    """Validate/normalize a data-representation string. Returns a canonical name or None."""
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    aliases = {"orderbook": "lob", "orderbooks": "lob", "raw": "lob",
+               "order_flow_imbalance": "ofi", "orderflowimbalance": "ofi"}
+    v = aliases.get(v, v)
+    if v not in DATA_REPRESENTATIONS:
+        raise ValueError(
+            f"Unknown data representation {value!r}. Choose one of: "
+            f"{', '.join(DATA_REPRESENTATIONS)}."
+        )
+    return v
+
+
+def prompt_for_data_representation(default: str = "lob") -> str:
+    """Interactively ask whether to run with raw LOB data or with OFI features added.
+
+    Returns a canonical representation name. Falls back to `default` on a bare Enter or
+    when stdin is not interactive (piped/batch runs).
+    """
+    import sys
+
+    print("\nWhich type of data do you want to run with?")
+    for i, r in enumerate(DATA_REPRESENTATIONS, start=1):
+        marker = " (default)" if r == default else ""
+        print(f"  [{i}] {r}{marker}\n      {DATA_REPRESENTATION_DESCRIPTIONS[r]}")
+
+    if not sys.stdin or not sys.stdin.isatty():
+        print(f"(non-interactive stdin) -> using default: {default}\n")
+        return default
+
+    while True:
+        choice = input(
+            f"\nEnter 1-{len(DATA_REPRESENTATIONS)} or a name [default: {default}]: "
+        ).strip().lower()
+        if choice == "":
+            return default
+        if choice.isdigit() and 1 <= int(choice) <= len(DATA_REPRESENTATIONS):
+            return DATA_REPRESENTATIONS[int(choice) - 1]
+        try:
+            return normalize_representation_arg(choice)
+        except ValueError as e:
+            print(f"  {e}")
+
+
+def resolve_representation(representation, default: str = "lob", interactive: bool = True) -> str:
+    """Return a canonical representation name: use `representation` if given, else prompt."""
+    representation = normalize_representation_arg(representation)
+    if representation is not None:
+        return representation
+    if interactive:
+        return prompt_for_data_representation(default=default)
+    return default
+
+
 def resolve_for_exchange(method, interactive: bool = True) -> str:
     """Top-level helper for the EXCHANGE path: ask data-type, then (if exchange) the
     normalization method. LOBSTER always returns 'rolling_5' without a method question.

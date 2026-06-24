@@ -8,6 +8,44 @@ import numpy as np
 import pandas as pd
 
 
+def _bid_order_flow(b_price: pd.Series, b_vol: pd.Series) -> pd.Series:
+    """
+    Bid-side order flow (bOF) for a single level (Cont et al.).
+
+    Compares the current bid price/volume with the previous tick:
+    - price went up   -> the whole current bid volume is new flow.
+    - price unchanged  -> only the change in volume is flow.
+    - price went down -> the previous resting volume left the book (negative flow).
+    """
+    up = b_price > b_price.shift(1)
+    same = b_price == b_price.shift(1)
+    dn = b_price < b_price.shift(1)
+    return up * b_vol + same * (b_vol - b_vol.shift(1)) + dn * (-b_vol.shift(1))
+
+
+def _ask_order_flow(a_price: pd.Series, a_vol: pd.Series) -> pd.Series:
+    """
+    Ask-side order flow (aOF) for a single level (Cont et al.).
+
+    Symmetric to the bid side:
+    - price went up   -> the previous resting ask volume left the book (negative flow).
+    - price unchanged  -> only the change in volume is flow.
+    - price went down -> the whole current ask volume is new flow.
+    """
+    up = a_price > a_price.shift(1)
+    same = a_price == a_price.shift(1)
+    dn = a_price < a_price.shift(1)
+    return up * (-a_vol.shift(1)) + same * (a_vol - a_vol.shift(1)) + dn * a_vol
+
+
+def _order_flow_imbalance(bp: pd.Series, bv: pd.Series, ap: pd.Series, av: pd.Series) -> pd.Series:
+    """
+    Order Flow Imbalance (OFI) for a single level: bid order flow minus ask order flow.
+    The first row is NaN (no previous tick to diff against) and is dropped downstream.
+    """
+    return _bid_order_flow(bp, bv) - _ask_order_flow(ap, av)
+
+
 def process_data(
         ticker: str,
         input_path: str,
@@ -17,6 +55,7 @@ def process_data(
         normalization_window: int,
         time_index: str = "seconds",
         features: str = "orderbooks",
+        data_representation: str = "lob",
         scaling: bool = True,
 ) -> None:
     """
@@ -59,6 +98,12 @@ def process_data(
         horizons (list): Forecasting horizons for labels.
         normalization_window (int): Window for rolling z-score normalization.
         features (str): Whether to return 'orderbooks' or 'orderflows'.
+        data_representation (str): Data representation to run with:
+            - 'lob': raw limit order book features only (40 columns).
+            - 'ofi': raw LOB features (40 columns) followed by multilevel Order Flow
+                     Imbalance features (1 OFI column per level, i.e. 10 columns),
+                     for a total of 50 feature columns. OFI columns are appended
+                     after the LOB block and before the label columns.
         scaling (bool): Whether to apply rolling z-score normalization.
 
     Returns:
@@ -296,7 +341,25 @@ def process_data(
             ]
 
         if features == "orderbooks":
-            pass
+            # When the user requested the 'ofi' representation, compute one Order Flow
+            # Imbalance feature per level (OFI = bid order flow - ask order flow) and use
+            # the 10 OFI columns as the ONLY features, replacing the 40 raw LOB columns.
+            # Only the OFI columns go into 'feature_names' so normalization applies to
+            # OFI alone. The LOB columns are dropped from the feature block just before
+            # saving (ASKp1/BIDp1 are retained in the unscaled file for the backtest).
+            if data_representation == "ofi":
+                ofi_feature_names = []
+                for i in range(1, levels + 1):
+                    ofi_col = f"OFI{i}"
+                    df_orderbook[ofi_col] = _order_flow_imbalance(
+                        df_orderbook[f"BIDp{i}"],
+                        df_orderbook[f"BIDs{i}"],
+                        df_orderbook[f"ASKp{i}"],
+                        df_orderbook[f"ASKs{i}"],
+                    )
+                    ofi_feature_names.append(ofi_col)
+                # OFI replaces the LOB features: only OFI columns are normalized.
+                feature_names = ofi_feature_names
         elif features == "orderflows":
             # Compute bid and ask multilevel orderflow.
             ASK_prices = df_orderbook.loc[:, df_orderbook.columns.str.contains("ASKp")]
@@ -426,6 +489,18 @@ def process_data(
         # Drop elements which cannot be used for training.
         df_orderbook = df_orderbook.dropna()
         df_orderbook.drop_duplicates(inplace=True, keep='last', subset='seconds')
+
+        # For the 'ofi' representation, keep ONLY the OFI features (the raw LOB columns are
+        # not part of the model input). The final layout is:
+        #   scaled   : seconds | OFI1..OFI<levels> | <label columns>
+        #   unscaled : seconds | OFI1..OFI<levels> | ASKp1 | BIDp1 | <label columns>
+        # ASKp1/BIDp1 are retained only in the unscaled file so the backtest can still
+        # reconstruct trade prices (it reads them by name); the loader reads only the
+        # scaled file and slices the first <levels> feature columns positionally.
+        if data_representation == "ofi":
+            label_columns = [c for c in df_orderbook.columns if c.startswith(("Raw_Target_", "Smooth_Target_"))]
+            price_columns = [] if scaling else ["ASKp1", "BIDp1"]
+            df_orderbook = df_orderbook[["seconds"] + ofi_feature_names + price_columns + label_columns]
 
         # Save processed files.
         output_name = f"{output_path}/{ticker}_{features}_{str(date.date())}"

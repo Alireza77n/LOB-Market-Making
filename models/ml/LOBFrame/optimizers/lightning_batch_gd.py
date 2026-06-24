@@ -213,6 +213,7 @@ class LOBLightningModule(pl.LightningModule):
             prediction_horizon=self.model_hyperparameters["prediction_horizon"],
             all_horizons=self.general_hyperparameters["horizons"],
             threshold=self.model_hyperparameters["threshold"],
+            data_representation=self.general_hyperparameters.get("data_representation", "lob"),
         )
         with open(
             os.path.join(logger.find_save_path(self.experiment_id), "prediction.pkl"),

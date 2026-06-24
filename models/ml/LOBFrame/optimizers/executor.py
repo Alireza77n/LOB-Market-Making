@@ -31,18 +31,43 @@ class Executor:
         if self.torch_dataset_preparation:
             create_tree(f"./torch_datasets/threshold_{model_hyperparameters['threshold']}/batch_size_{model_hyperparameters['batch_size']}/training_{self.training_stocks_string}_test_{self.test_stocks_string}/{model_hyperparameters['prediction_horizon']}/")
 
+        # Determine the number of input feature columns from the data representation.
+        #   'lob' -> 40 (full) / 20 (lighten): raw LOB.
+        #   'ofi' -> 10 (full) /  5 (lighten): pure multilevel OFI (replaces LOB).
+        data_representation = general_hyperparameters.get("data_representation", "lob")
+        if data_representation == "ofi":
+            num_features = 5 if model_hyperparameters["lighten"] else 10
+        else:
+            num_features = 20 if model_hyperparameters["lighten"] else 40
+
+        # The pure-OFI representation (10 features) has no bid/ask x level spatial structure,
+        # so the LOB-spatial models below assume an input width they cannot get. Only the
+        # feature-vector / sequence models (transformer, dla, cnn1) accept an arbitrary
+        # feature width. Fail fast with a clear message instead of a deep shape error.
+        OFI_COMPATIBLE_MODELS = {"transformer", "dla", "cnn1"}
+        model_name = general_hyperparameters["model"]
+        if data_representation == "ofi" and model_name not in OFI_COMPATIBLE_MODELS:
+            raise ValueError(
+                f"Model '{model_name}' is not compatible with the pure-OFI data "
+                f"representation: it assumes a 40-wide LOB input with bid/ask x level "
+                f"structure, but 'ofi' provides {num_features} OFI features. "
+                f"Choose one of the OFI-compatible models "
+                f"({', '.join(sorted(OFI_COMPATIBLE_MODELS))}), or use "
+                f"--data_representation lob for this model."
+            )
+
         if general_hyperparameters["model"] == "deeplob":
             self.model = DeepLOB(lighten=model_hyperparameters["lighten"])
         elif general_hyperparameters["model"] == "transformer":
-            self.model = Transformer(lighten=model_hyperparameters["lighten"])
+            self.model = Transformer(lighten=model_hyperparameters["lighten"], num_features=num_features)
         elif general_hyperparameters["model"] == "itransformer":
             self.model = ITransformer(lighten=model_hyperparameters["lighten"])
         elif general_hyperparameters["model"] == "lobtransformer":
             self.model = LobTransformer(lighten=model_hyperparameters["lighten"])
         elif general_hyperparameters["model"] == "dla":
-            self.model = DLA(lighten=model_hyperparameters["lighten"])
+            self.model = DLA(lighten=model_hyperparameters["lighten"], num_features=num_features)
         elif general_hyperparameters["model"] == "cnn1":
-            self.model = CNN1()
+            self.model = CNN1(num_features=num_features)
         elif general_hyperparameters["model"] == "cnn2":
             self.model = CNN2()
         elif general_hyperparameters["model"] == "binbtabl":
@@ -68,6 +93,7 @@ class Executor:
                 all_horizons=general_hyperparameters["horizons"],
                 prediction_horizon=model_hyperparameters["prediction_horizon"],
                 targets_type=general_hyperparameters["targets_type"],
+                data_representation=general_hyperparameters.get("data_representation", "lob"),
                 balanced_dataloader=model_hyperparameters["balanced_sampling"],
                 training_stocks=general_hyperparameters["training_stocks"],
                 validation_stocks=general_hyperparameters["target_stocks"],
@@ -96,6 +122,7 @@ class Executor:
                 threshold=model_hyperparameters["threshold"],
                 all_horizons=general_hyperparameters["horizons"],
                 targets_type=general_hyperparameters["targets_type"],
+                data_representation=general_hyperparameters.get("data_representation", "lob"),
                 prediction_horizon=model_hyperparameters["prediction_horizon"],
                 training_stocks=general_hyperparameters["training_stocks"],
                 validation_stocks=general_hyperparameters["target_stocks"],
@@ -123,6 +150,7 @@ class Executor:
                 threshold=model_hyperparameters["threshold"],
                 all_horizons=general_hyperparameters["horizons"],
                 targets_type=general_hyperparameters["targets_type"],
+                data_representation=general_hyperparameters.get("data_representation", "lob"),
                 prediction_horizon=model_hyperparameters["prediction_horizon"],
                 backtest=True,
                 training_stocks=general_hyperparameters["training_stocks"],
@@ -141,6 +169,7 @@ class Executor:
                 threshold=model_hyperparameters["threshold"],
                 all_horizons=general_hyperparameters["horizons"],
                 targets_type=general_hyperparameters["targets_type"],
+                data_representation=general_hyperparameters.get("data_representation", "lob"),
                 prediction_horizon=model_hyperparameters["prediction_horizon"],
                 training_stocks=general_hyperparameters["training_stocks"],
                 validation_stocks=general_hyperparameters["target_stocks"],

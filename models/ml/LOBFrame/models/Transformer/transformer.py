@@ -55,6 +55,7 @@ class Transformer(pl.LightningModule):
     def __init__(
         self,
         lighten,
+        num_features: int = 40,
         dropout: float = 0.1,
         activation: str = "relu",
         norm_first: bool = False,
@@ -69,7 +70,9 @@ class Transformer(pl.LightningModule):
         nhead = 8 if not lighten else 4
         num_layers = 2 if not lighten else 1
 
-        self.embed = nn.Linear(40, d_model, bias=False)
+        # The encoder embeds the per-timestep feature vector, whose width depends on the
+        # data representation: 40 (lob) / 20 (lighten lob) / 10 (ofi) / 5 (lighten ofi).
+        self.embed = nn.Linear(num_features, d_model, bias=False)
 
         self.embed_positions = SinusoidalPositionalEmbedding(100, d_model)
 

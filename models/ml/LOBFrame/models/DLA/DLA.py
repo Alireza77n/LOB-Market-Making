@@ -4,13 +4,15 @@ import torch
 
 
 class DLA(pl.LightningModule):
-    def __init__(self, lighten, num_snapshots=100, hidden_size=128):
+    def __init__(self, lighten, num_features=None, num_snapshots=100, hidden_size=128):
         super().__init__()
         self.name = "mlp"
-        num_features = 40
+        # Feature width depends on the data representation; default to the raw-LOB widths
+        # (40 full / 20 lighten) when not provided. For pure OFI this is 10 / 5.
         if lighten:
             self.name += "-lighten"
-            num_features = 20
+        if num_features is None:
+            num_features = 20 if lighten else 40
 
         self.W1 = nn.Linear(num_features, num_features, bias=False)
 

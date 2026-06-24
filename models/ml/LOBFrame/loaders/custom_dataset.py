@@ -25,6 +25,7 @@ class CustomDataset(Dataset):
         all_horizons,
         prediction_horizon,
         targets_type,
+        data_representation="lob",
         balanced_dataloader=False,
         backtest=False,
         training_stocks=None,
@@ -38,6 +39,12 @@ class CustomDataset(Dataset):
         self.balanced_dataloader = balanced_dataloader  # Whether to use a balanced dataloader or not. This option is available only for training.
         self.backtest = backtest
         self.targets_type = targets_type
+        self.data_representation = data_representation  # "lob" (40 raw LOB features) or "ofi" (10 pure OFI features).
+        # Number of feature columns preceding the label columns in each processed CSV.
+        # - "lob": 40 raw LOB columns (4 fields x 10 levels).
+        # - "ofi": 10 multilevel Order Flow Imbalance columns (1 per level) that REPLACE
+        #          the raw LOB columns, so labels start right after the 10 OFI columns.
+        self.num_features = 10 if data_representation == "ofi" else 40
 
         if self.learning_stage == "training":
             file_patterns = [f"./data/{dataset}/scaled_data/{self.learning_stage}/{element}_orderbooks*.csv" for element in training_stocks]
@@ -280,16 +287,20 @@ class CustomDataset(Dataset):
                 else index - self.cumulative_lengths[dataset_index]
             )
 
+            window = self.cache_data[self.current_cache_index][
+                start_index: start_index + self.window_size
+            ]
             if self.lighten:
-                # If the "lighten" option is enabled, we use only the first 5 levels of the orderbook (i.e. 4_level_features * 5_levels = 20_orderbook_features).
-                window_data = self.cache_data[self.current_cache_index][
-                    start_index: start_index + self.window_size, :20
-                ]
+                # The "lighten" option uses only the first 5 levels:
+                #   - lob: first 5 LOB levels = 4 fields x 5 levels = 20 features.
+                #   - ofi: first 5 OFI levels = 5 features (one OFI column per level).
+                lighten_features = 5 if self.data_representation == "ofi" else 20
+                window_data = window[:, :lighten_features]
             else:
-                # If the "lighten" option is not enabled, we use all the 10 levels of the orderbook (i.e. 4_level_features * 10_levels = 40_orderbook_features).
-                window_data = self.cache_data[self.current_cache_index][
-                    start_index: start_index + self.window_size, :40
-                ]
+                # All 10 levels:
+                #   - lob: 4 fields x 10 levels = 40 features.
+                #   - ofi: 10 OFI columns (one per level). self.num_features == 10.
+                window_data = window[:, :self.num_features]
 
             # Determine the position of the prediction horizon in the list of all horizons.
             position = next(
@@ -301,8 +312,10 @@ class CustomDataset(Dataset):
                 None,
             )
             # Extract the label from the dataset given its position.
+            # Labels are stored in the columns following the feature columns
+            # (40 for the 'lob' representation, 10 for 'ofi').
             label = self.cache_data[self.current_cache_index][
-                start_index + self.window_size, 40:
+                start_index + self.window_size, self.num_features:
             ][position]
             # Discretize the label using the provided threshold.
             if self.backtest is False:

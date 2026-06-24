@@ -26,16 +26,24 @@ Output contract (must match loaders/custom_dataset.py & utils.get_best_levels_pr
 ----------------------------------------------------------------------------------------------
 Each processed CSV has columns, in this exact order:
 
+  data_representation == "lob" (40 features):
     seconds,
-    ASKp1, ASKs1, BIDp1, BIDs1, ... ASKp10, ASKs10, BIDp10, BIDs10,   # 40 features
-    Raw_Target_<h1>, Raw_Target_<h2>, ...,                            # raw labels (one per horizon)
-    Smooth_Target_<h1>, Smooth_Target_<h2>, ...                       # smooth labels (one per horizon)
+    ASKp1, ASKs1, BIDp1, BIDs1, ... ASKp10, ASKs10, BIDp10, BIDs10,   # 40 LOB features
+    Raw_Target_<h1>, ..., Smooth_Target_<h1>, ...                     # labels (one per horizon)
 
-  * The loader drops column 0 (`seconds`) via df.values[:, 1:], so features land at
-    indices 0..39 and labels at index 40.. .
-  * __getitem__ selects the label by *position* of `prediction_horizon` within
-    `--horizons`, indexing into the slice [40:]. Hence the Raw_* block (the default
-    targets_type) must come first so positions line up.
+  data_representation == "ofi" (10 PURE OFI features; raw LOB REPLACED):
+    scaled   : seconds, OFI1..OFI10, Raw_Target_*, Smooth_Target_*
+    unscaled : seconds, OFI1..OFI10, ASKp1, BIDp1, Raw_Target_*, Smooth_Target_*
+
+  * The loader drops column 0 (`seconds`) via df.values[:, 1:] and slices the first
+    num_features columns (40 for 'lob', 10 for 'ofi') as the model input; labels follow.
+  * __getitem__ selects the label by *position* of `prediction_horizon` within `--horizons`,
+    indexing into the slice [num_features:]. Hence the Raw_* block must come first.
+  * For 'ofi', OFI per level = bid order flow - ask order flow (Cont et al.) and is z-scored
+    on its own (no LOB columns in the feature set). ASKp1/BIDp1 are kept ONLY in the unscaled
+    file (read by name) so the backtest can reconstruct prices; the loader reads only scaled.
+  * CustomDataset / get_best_levels_prices_and_labels must be told the representation so they
+    use the right feature width (40 vs 10) and read labels/prices correctly.
   * Prices are kept as integer ticks (like LOBSTER), mid-price = (ASKp1+BIDp1)//... ,
     labels are mid-price *differences* in ticks (Raw) / smoothed differences (Smooth).
 
@@ -173,6 +181,32 @@ def feature_names(levels: int) -> list[str]:
     return names
 
 
+def ofi_feature_names(levels: int) -> list[str]:
+    """Names of the appended multilevel Order Flow Imbalance columns (one per level)."""
+    return [f"OFI{i}" for i in range(1, levels + 1)]
+
+
+def add_ofi_features(df: pd.DataFrame, levels: int) -> list[str]:
+    """Add one Order Flow Imbalance column per level to `df`, in place.
+
+    OFI per level = bid order flow - ask order flow (Cont et al.); see
+    data_processing/data_process.py for the shared definition. The first row is NaN
+    (no previous snapshot to diff against) and is dropped by the caller.
+
+    In the 'ofi' representation these OFI columns become the model's ONLY features
+    (the raw LOB columns are excluded from the feature set, though ASKp1/BIDp1 are kept
+    in the unscaled file for the backtest). Returns the list of OFI column names added.
+    """
+    from data_processing.data_process import _order_flow_imbalance
+
+    names = ofi_feature_names(levels)
+    for i in range(1, levels + 1):
+        df[f"OFI{i}"] = _order_flow_imbalance(
+            df[f"BIDp{i}"], df[f"BIDs{i}"], df[f"ASKp{i}"], df[f"ASKs{i}"]
+        )
+    return names
+
+
 def make_labels(mid: np.ndarray, horizons: list[int]) -> dict[str, np.ndarray]:
     """Replicate LOBFrame's labelling in tick units.
     Raw_Target_h  = mid[t+h] - mid[t]
@@ -257,7 +291,17 @@ def main():
              "'rolling_1' (1-day rolling z-score), or 'rolling_5' (original LOBFrame "
              "5-day rolling z-score). If omitted, you'll be asked interactively.",
     )
+    p.add_argument(
+        "--data_representation", default=None, choices=["lob", "ofi"],
+        help="Data representation to run with: 'lob' (raw limit order book, 40 features) "
+             "or 'ofi' (raw LOB + multilevel Order Flow Imbalance, 50 features). "
+             "If omitted, you'll be asked interactively.",
+    )
     args = p.parse_args()
+
+    # Resolve the data representation (raw LOB vs. OFI). Asked first, mirroring main.py.
+    representation = norm.resolve_representation(args.data_representation, interactive=True)
+    print(f"Data representation: {representation} -> {norm.DATA_REPRESENTATION_DESCRIPTIONS[representation]}")
 
     # Resolve the normalization method. If --normalization was not passed, ask which data
     # type is being used; LOBSTER auto-selects the 5-day rolling, exchange data prompts
@@ -283,7 +327,22 @@ def main():
     df = df.reset_index(drop=True)
     print(f"Dropped {before - len(df)} crossed/invalid rows; {len(df)} remain.")
 
-    # Mid-price in ticks (integer), exactly as LOBFrame derives it.
+    # For the OFI representation, compute one Order Flow Imbalance column per level and use
+    # the OFI columns as the ONLY features, REPLACING the 40 raw LOB columns. OFI is
+    # computed on the cleaned, consecutive rows so the per-row diffs are meaningful; the
+    # first row is NaN and is dropped here. `fnames` (the columns that get z-scored) is set
+    # to the OFI names so normalization applies to OFI alone.
+    if representation == "ofi":
+        ofi_names = add_ofi_features(df, LEVELS)
+        fnames = ofi_names  # OFI replaces LOB as the feature set.
+        # The first row has NaN OFI (no previous snapshot to diff against). Drop it now so
+        # every downstream step (scaling, splitting, unscaled alignment) sees clean rows.
+        df = df.dropna(subset=ofi_names).reset_index(drop=True)
+        print(f"Using {len(ofi_names)} OFI feature columns (raw LOB dropped from features); "
+              f"dropped the leading row with undefined OFI.")
+
+    # Mid-price in ticks (integer), exactly as LOBFrame derives it. Read from ASKp1/BIDp1
+    # which are still present on `df` at this point (even in 'ofi' mode).
     mid = ((df["ASKp1"] + df["BIDp1"]) / 2).round().astype(np.int64).to_numpy()
 
     labels = make_labels(mid, horizons)
@@ -291,7 +350,15 @@ def main():
         df[col] = vals
 
     label_cols = [f"Raw_Target_{h}" for h in horizons] + [f"Smooth_Target_{h}" for h in horizons]
-    ordered_cols = ["seconds"] + fnames + label_cols
+    # The scaled (model-input) file carries seconds + features + labels. For 'ofi' the
+    # unscaled file ADDITIONALLY keeps ASKp1/BIDp1 (by name) so the backtest can reconstruct
+    # trade prices; the loader only ever reads the scaled file. For 'lob' both files share
+    # the same column set (the raw LOB features already include ASKp1/BIDp1).
+    scaled_cols = ["seconds"] + fnames + label_cols
+    if representation == "ofi":
+        unscaled_cols = ["seconds"] + fnames + ["ASKp1", "BIDp1"] + label_cols
+    else:
+        unscaled_cols = scaled_cols
 
     # ------------------------------------------------------------------ scaling
     # Build the SCALED feature frame for the whole dataset according to `method`.
@@ -356,7 +423,7 @@ def main():
             # keeps it verbatim for plotting/backtest indexing).
             part.insert(0, "seconds", part["time"].astype(str))
 
-            out = part[ordered_cols]
+            out = part[scaled_cols if scaled else unscaled_cols]
             # One file per calendar day so the loader's per-file logic behaves naturally.
             part_dates = pd.to_datetime(part["time"]).dt.date
             for day, idx in part_dates.groupby(part_dates).groups.items():
