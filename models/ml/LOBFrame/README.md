@@ -135,7 +135,7 @@ A few notes on how it differs from the upstream layout:
 │             ├── training
 │             └── validation
 ├── data_processing
-│   ├── convert_exchange_data.py            # exchange CSV -> processed LOBFrame format (auto-detects book convention)
+│   ├── convert_exchange_data.py            # exchange CSV -> processed LOBFrame format (auto-detects book convention, supports --data_representation)
 │   ├── normalization.py                    # shared z-score methods (global / rolling_1 / rolling_5) + interactive selector
 │   ├── data_process.py                     # LOBSTER-only (unused with exchange data)
 │   ├── data_process_utils.py
@@ -243,6 +243,8 @@ must be consistent across all three steps.
 #          --clean wipes any previous split for THIS dataset folder first.
 #          --normalization picks the z-score scheme; omit it to be asked interactively
 #          (see "Feature normalization" below). global is the safe default for low volume.
+#          --data_representation picks "lob" (40 raw LOB features) or "ofi" (10 pure OFI
+#          features replacing LOB); omit it to be asked interactively (see below).
 ./.venv/Scripts/python.exe data_processing/convert_exchange_data.py \
   --input_csv "<CSV>" --symbol "<SYM>" --horizons "10,50,100" --normalization global --clean
 
@@ -284,6 +286,24 @@ Notes:
   test performance. The rolling methods exist for that case.
 - The unscaled copy in `unscaled_data/` always keeps raw integer prices/volumes (the
   backtest needs them) and is restricted to the same surviving rows as the scaled copy.
+
+### Data representation
+
+Step A also accepts `--data_representation {lob,ofi}` to control which feature set is used as
+the model input:
+
+| `--data_representation` | What the model sees | When to use |
+| --- | --- | --- |
+| `lob` *(default)* | 40 raw LOB columns (ASKp1, ASKs1, ..., BIDp10, BIDs10) — the original LOBFrame behaviour. | General LOB modelling; any model is compatible. |
+| `ofi` | 10 pure Order Flow Imbalance columns (one per level), **replacing** the raw LOB columns. OFI per level = bid order flow − ask order flow (Cont et al.) and is z-scored on its own. (ASKp1/BIDp1 are kept only in the unscaled file so the backtest can reconstruct trade prices.) | Field-standard microstructure signal; reduces feature count; requires a compatible model (see below). |
+
+If the flag is omitted you are asked **interactively** (first in `convert_exchange_data.py`,
+then in `main.py` for consistency).
+
+**OFI-compatible models:** `transformer`, `dla`, `cnn1` — these accept an arbitrary feature
+width. Models that assume a 40-wide LOB structure (`deeplob`, `lobtransformer`, `itransformer`,
+`cnn2`, `binbtabl`, `binctabl`, `axiallob`, `hlob`) will fail with a clear error if selected
+with `--data_representation ofi`.
 
 **Worked example — DeepLOB on nobitex BTC:**
 
@@ -348,6 +368,9 @@ Swap `<MODEL>` in steps B and C for any of the models the framework ships with:
   --horizons "10,50,100" --prediction_horizon 10 \
   --stages "complete_homological_structures_preparation" --num_workers 0
 ```
+
+**OFI models:** When you pick `--data_representation ofi`, only `transformer`, `dla`, and
+`cnn1` are compatible. Use `lob` for all other models.
 
 ## 4. Tips & gotchas (our dataset)
 
