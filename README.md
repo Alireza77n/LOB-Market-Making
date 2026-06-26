@@ -49,6 +49,8 @@ LOB-Market-Making/
 │   ├── plots/                  # Generated figures
 │   └── metrics/                # PnL, Sharpe, fill rate, inventory trackers
 │
+├── monitoring/                 # Live dashboard for collected exchange data
+│
 ├── utils/                      # Shared helpers (time, math, logging)
 ├── configs/                    # YAML/TOML strategy and data configs
 └── tests/                      # Unit and integration tests
