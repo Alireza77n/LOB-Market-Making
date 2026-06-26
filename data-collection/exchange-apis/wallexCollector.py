@@ -40,6 +40,18 @@ OUTPUT_DIR   = "wallex_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+# Timestamp helper
+
+def now_ms():
+    """UTC wall-clock to millisecond precision, e.g. '2026-06-26 14:09:42.317'.
+
+    Stamped at each fetch site (not once per loop) so every order-book and
+    trade snapshot carries the instant it was actually observed — a
+    prerequisite for intra-poll ordering and lead-lag analysis.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 # CSV helpers
 
 def orderbook_csv_path(symbol):
@@ -166,20 +178,21 @@ def save_trades(symbol, trades, snapshot_ts):
 # Main loop
 
 def collect_once():
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{ts} UTC] Collecting ...")
+    print(f"\n[{now_ms()} UTC] Collecting ...")
 
     for sym in SYMBOLS:
         ob = fetch_orderbook(sym)
+        ob_ts = now_ms()                      # stamp this fetch individually
         if ob:
-            save_orderbook(sym, ob, ts)
+            save_orderbook(sym, ob, ob_ts)
             bid1 = ob["bid"][0] if ob.get("bid") else {}
             ask1 = ob["ask"][0] if ob.get("ask") else {}
             print(f"  [{sym}] best bid={bid1.get('price','N/A')}  best ask={ask1.get('price','N/A')}")
 
         trades = fetch_trades(sym)
+        tr_ts = now_ms()                      # stamp this fetch individually
         if trades is not None:
-            save_trades(sym, trades, ts)
+            save_trades(sym, trades, tr_ts)
 
 
 def main():

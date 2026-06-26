@@ -33,6 +33,18 @@ OUTPUT_DIR   = "nobitex_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+# Timestamp helper
+
+def now_ms():
+    """UTC wall-clock to millisecond precision, e.g. '2026-06-26 14:09:42.317'.
+
+    Stamped at each fetch site (not once per loop) so every order-book and
+    trade snapshot carries the instant it was actually observed — a
+    prerequisite for intra-poll ordering and lead-lag analysis.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 # CSV helpers
 
 def orderbook_csv_path(symbol):
@@ -151,20 +163,21 @@ def save_trades(symbol, data, snapshot_ts):
 # Main loop
 
 def collect_once():
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[{ts} UTC] Collecting ...")
+    print(f"\n[{now_ms()} UTC] Collecting ...")
 
     for sym in SYMBOLS:
         ob = fetch_orderbook(sym)
+        ob_ts = now_ms()                      # stamp this fetch individually
         if ob:
-            save_orderbook(sym, ob, ts)
+            save_orderbook(sym, ob, ob_ts)
             bid1 = ob["bids"][0] if ob["bids"] else ["N/A", "N/A"]
             ask1 = ob["asks"][0] if ob["asks"] else ["N/A", "N/A"]
             print(f"  [{sym}] best bid={bid1[0]}  best ask={ask1[0]}")
 
         tr = fetch_trades(sym)
+        tr_ts = now_ms()                      # stamp this fetch individually
         if tr:
-            save_trades(sym, tr, ts)
+            save_trades(sym, tr, tr_ts)
 
 
 def main():

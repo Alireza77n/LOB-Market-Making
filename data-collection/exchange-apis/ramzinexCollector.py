@@ -57,6 +57,18 @@ OUTPUT_DIR   = "ramzinex_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+# Timestamp helper
+
+def now_ms():
+    """UTC wall-clock to millisecond precision, e.g. '2026-06-26 14:09:42.317'.
+
+    Stamped at each fetch site (not once per loop) so every order-book and
+    trade snapshot carries the instant it was actually observed — a
+    prerequisite for intra-poll ordering and lead-lag analysis.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 # CSV helpers
 
 def orderbook_csv_path(symbol):
@@ -234,13 +246,13 @@ def save_trades(symbol, trades, snapshot_ts):
 # Main loop
 
 def collect_once():
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts} UTC] Collecting ...")
+    print(f"[{now_ms()} UTC] Collecting ...")
 
     for sym, pair_id in PAIRS.items():
         ob = fetch_orderbook(pair_id)
+        ob_ts = now_ms()                      # stamp this fetch individually
         if ob is not None:
-            save_orderbook(sym, ob, ts)
+            save_orderbook(sym, ob, ob_ts)
             bids = ob.get("buys",  [])
             asks = ob.get("sells", [])
             bid1 = _price_vol(bids[0])[0] if bids else "N/A"
@@ -248,7 +260,8 @@ def collect_once():
             print(f"  [{sym}] best bid={bid1}  best ask={ask1}")
 
         trades = fetch_trades(pair_id)
-        save_trades(sym, trades, snapshot_ts=ts)
+        tr_ts = now_ms()                      # stamp this fetch individually
+        save_trades(sym, trades, snapshot_ts=tr_ts)
 
 
 def main():
