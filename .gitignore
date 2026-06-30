@@ -17,6 +17,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Collected exchange data (written by data-collection/exchange-apis collectors)
+*_data/
+
 # Secrets / API keys
 *.key
 *.secret
