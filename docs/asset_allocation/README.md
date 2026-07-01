@@ -1,6 +1,6 @@
 # Asset Allocation Module — DeepLOB + DLS
 
-# 1. Overview
+## 1. Overview
 
 This branch adds an **Asset Allocation** module to the `LOB-Market-Making` repository.
 
@@ -55,7 +55,8 @@ LOB-Market-Making/
 │       ├── requirements.txt
 │       ├── .streamlit/
 │       │   └── config.toml
-│
+│       └── data/
+│           └── exported CSV files
 ```
 
 ---
@@ -93,7 +94,7 @@ Main tasks implemented in the notebook:
 ### Path
 
 ```text
-docs/asset_allocation/DeepLOB_DLS_Report_Objective_Function_Expanded.pdf
+docs/asset_allocation/DeepLOB_DLS_Report_documentation.pdf
 ```
 
 ### Description
@@ -198,45 +199,67 @@ The implemented system contains two neural-network components:
 
 DeepLOB is used to predict the direction of future price movement for each asset.
 
-For each asset `i` and signal day `t`, DeepLOB outputs three probabilities:
+For each asset $i$ and signal day $t$, DeepLOB outputs three probabilities:
 
-```text
-p_down(t, i), p_flat(t, i), p_up(t, i)
-```
+$$
+p_{\mathrm{down}}(t,i), 
+\qquad
+p_{\mathrm{flat}}(t,i), 
+\qquad
+p_{\mathrm{up}}(t,i)
+$$
 
-with:
+These three probabilities satisfy:
 
-```text
-p_down(t, i) + p_flat(t, i) + p_up(t, i) = 1
-```
+$$
+p_{\mathrm{down}}(t,i)
++
+p_{\mathrm{flat}}(t,i)
++
+p_{\mathrm{up}}(t,i)
+=
+1
+$$
 
 Interpretation:
 
-| Probability | Meaning                               |
-| ----------- | ------------------------------------- |
-| `p_down`  | Probability of price decline          |
-| `p_flat`  | Probability of neutral price movement |
-| `p_up`    | Probability of price increase         |
+| Probability           | Meaning                               |
+| --------------------- | ------------------------------------- |
+| $p_{\mathrm{down}}$ | Probability of price decline          |
+| $p_{\mathrm{flat}}$ | Probability of neutral price movement |
+| $p_{\mathrm{up}}$   | Probability of price increase         |
 
 ### DeepLOB Input Shape
 
-```text
-(B, 1, T, NF) = (B, 1, 50, 259)
-```
+The input tensor of the DeepLOB model is:
+
+$$
+X_{\mathrm{LOB}}
+\in
+\mathbb{R}^{B \times 1 \times T \times N_F}
+$$
+
+In the executed notebook, the shape is:
+
+$$
+X_{\mathrm{LOB}}
+\in
+\mathbb{R}^{B \times 1 \times 50 \times 259}
+$$
 
 where:
 
-| Symbol | Meaning                  |
-| ------ | ------------------------ |
-| `B`  | Batch size               |
-| `T`  | Time-window length       |
-| `NF` | Number of input features |
+| Symbol        | Meaning                  |
+| ------------- | ------------------------ |
+| $B$         | Batch size               |
+| $T = 50$    | Time-window length       |
+| $N_F = 259$ | Number of input features |
 
 The final DeepLOB feature width is:
 
-```text
-NF = 259
-```
+$$
+N_F = 259
+$$
 
 The feature set includes:
 
@@ -268,11 +291,43 @@ The loaded pretrained DeepLOB checkpoint contains approximately:
 199,203 trainable parameters
 ```
 
-The DeepLOB output is:
+The DeepLOB output can be written as:
 
-```text
-DeepLOB(X) = [p_down, p_flat, p_up]
-```
+$$
+\hat{\mathbf{p}}(t,i)
+=
+\mathrm{DeepLOB}
+\left(
+X_{\mathrm{LOB}}(t,i)
+\right)
+$$
+
+or equivalently:
+
+$$
+\hat{\mathbf{p}}(t,i)
+=
+\begin{bmatrix}
+p_{\mathrm{down}}(t,i) \\
+p_{\mathrm{flat}}(t,i) \\
+p_{\mathrm{up}}(t,i)
+\end{bmatrix}
+\in
+\mathbb{R}^{3}
+$$
+
+More explicitly, the final classification head applies a softmax function:
+
+$$
+\hat{\mathbf{p}}(t,i)
+=
+\mathrm{softmax}
+\left(
+W_{\mathrm{DL}} h^{\mathrm{DL}}_{T}(t,i)
++
+b_{\mathrm{DL}}
+\right)
+$$
 
 ---
 
@@ -280,82 +335,144 @@ DeepLOB(X) = [p_down, p_flat, p_up]
 
 DLS receives DeepLOB probability outputs and converts them into portfolio weights.
 
-For each asset, the notebook constructs two additional features:
+For each asset, the notebook constructs two additional features from the DeepLOB probabilities.
 
-```text
-signal_score(t, i) = p_up(t, i) - p_down(t, i)
-```
+The first feature is the directional signal score:
 
-```text
-confidence(t, i) = |signal_score(t, i)| × (1 - p_flat(t, i))
-```
+$$
+\mathrm{signal\_score}(t,i)
+=
+p_{\mathrm{up}}(t,i)
+-
+p_{\mathrm{down}}(t,i)
+$$
+
+The second feature is the confidence score:
+
+$$
+\mathrm{confidence}(t,i)
+=
+\left|
+\mathrm{signal\_score}(t,i)
+\right|
+\left(
+1
+-
+p_{\mathrm{flat}}(t,i)
+\right)
+$$
 
 Therefore, each asset has a 5-dimensional DLS input vector:
 
-```text
-z(t, i) = [
-    p_down(t, i),
-    p_flat(t, i),
-    p_up(t, i),
-    signal_score(t, i),
-    confidence(t, i)
-]
-```
+$$
+\mathbf{z}(t,i)
+=
+\begin{bmatrix}
+p_{\mathrm{down}}(t,i) \\
+p_{\mathrm{flat}}(t,i) \\
+p_{\mathrm{up}}(t,i) \\
+\mathrm{signal\_score}(t,i) \\
+\mathrm{confidence}(t,i)
+\end{bmatrix}
+\in
+\mathbb{R}^{5}
+$$
 
 The full probability feature panel is:
 
-```text
-X_prob ∈ R^(D × N × 5)
-```
+$$
+X_{\mathrm{prob}}
+\in
+\mathbb{R}^{D \times N \times 5}
+$$
 
 where:
 
 | Symbol | Meaning                            |
 | ------ | ---------------------------------- |
-| `D`  | Number of signal days              |
-| `N`  | Number of assets                   |
-| `5`  | Number of DeepLOB-derived features |
+| $D$  | Number of signal days              |
+| $N$  | Number of assets                   |
+| $5$  | Number of DeepLOB-derived features |
 
 The DLS lookback window is:
 
-```text
+$$
 L = 50
-```
+$$
 
 So the DLS input for each day is:
 
-```text
-X_DLS(t) ∈ R^(L × N × 5)
-```
+$$
+X_{\mathrm{DLS}}(t)
+=
+\left[
+X_{\mathrm{prob}}(t-L+1),
+X_{\mathrm{prob}}(t-L+2),
+\ldots,
+X_{\mathrm{prob}}(t)
+\right]
+$$
 
-### DLS Flattening Step
+with shape:
 
-At each time step, the asset-feature panel is flattened:
+$$
+X_{\mathrm{DLS}}(t)
+\in
+\mathbb{R}^{L \times N \times 5}
+$$
 
-```text
-X_prob(t) ∈ R^(N × 5)
-```
+---
 
-into:
+## 7.3 DLS Flattening Step
 
-```text
-vec(X_prob(t)) ∈ R^(5N)
-```
+At each time step, the asset-feature panel is flattened.
+
+Before flattening:
+
+$$
+X_{\mathrm{prob}}(t)
+\in
+\mathbb{R}^{N \times 5}
+$$
+
+After flattening:
+
+$$
+\mathrm{vec}
+\left(
+X_{\mathrm{prob}}(t)
+\right)
+\in
+\mathbb{R}^{5N}
+$$
 
 In the executed notebook:
 
-```text
-N = 2,306
-5N = 11,530
-```
+$$
+N = 2306
+$$
+
+Therefore:
+
+$$
+5N
+=
+5 \times 2306
+=
+11530
+$$
 
 So the LSTM input size is:
 
-```text
-11,530
-```
+$$
+\mathrm{input\_size}_{\mathrm{LSTM}}
+=
+11530
+$$
 
-### DLS Architecture
+---
+
+## 7.4 DLS Architecture
 
 The DLS network structure is:
 
@@ -374,34 +491,79 @@ Linear layer: 64 → N
         ↓
 Tradability mask
         ↓
-Softmax
+Masked softmax
         ↓
 Target portfolio weights
 ```
 
-The final layer produces asset-level logits:
+The DLS LSTM produces a hidden state:
 
-```text
-a(t) = W h(t) + b
-```
+$$
+h^{\mathrm{DLS}}_{L}(t)
+$$
 
-Then masked softmax is applied:
+The final linear layer maps this hidden state to asset-level logits:
 
-```text
-w_i(t) = exp(a_i(t)) / Σ_j exp(a_j(t))
-```
+$$
+\mathbf{a}(t)
+=
+W_{\mathrm{DLS}}
+h^{\mathrm{DLS}}_{L}(t)
++
+b_{\mathrm{DLS}}
+$$
 
-Non-tradable assets are masked before softmax by assigning a very negative logit value.
+where:
+
+$$
+\mathbf{a}(t)
+\in
+\mathbb{R}^{N}
+$$
+
+For non-tradable assets, the corresponding logit is masked before applying softmax:
+
+$$
+a_i(t)
+=
+-10^9,
+\qquad
+\text{if asset } i \text{ is not tradable}
+$$
+
+The final portfolio weight of asset $i$ is obtained using masked softmax:
+
+$$
+w_i(t)
+=
+\frac{
+\exp
+\left(
+a_i(t)
+\right)
+}{
+\sum_{j=1}^{N}
+\exp
+\left(
+a_j(t)
+\right)
+}
+$$
 
 The DLS output is a long-only target weight vector:
 
-```text
-w_i(t) ≥ 0
-```
+$$
+w_i(t) \geq 0
+$$
 
-```text
-Σ_i w_i(t) = 1
-```
+and:
+
+$$
+\sum_{i=1}^{N}
+w_i(t)
+=
+1
+$$
 
 The implemented ShifuDLSNet contains approximately:
 
@@ -423,9 +585,17 @@ Day t + 2 : Trade outcome is evaluated
 
 The future return label is:
 
-```text
-R_future(t, i) = close(t + 2, i) / vwap_entry(t + 1, i) - 1
-```
+$$
+R_{\mathrm{future}}(t,i)
+=
+\frac{
+\mathrm{Close}(t+2,i)
+}{
+\mathrm{VWAP}_{\mathrm{entry}}(t+1,i)
+}
+-
+1
+$$
 
 This convention prevents the model from using future information when making trading decisions.
 
@@ -439,27 +609,46 @@ Instead of using a classification loss, the model is trained based on the financ
 
 The gross portfolio return is:
 
-```text
-R_gross(t) = Σ_i w'_i(t) R_future(t, i)
-```
+$$
+R_{\mathrm{gross}}(t)
+=
+\sum_{i=1}^{N}
+w'_i(t)
+R_{\mathrm{future}}(t,i)
+$$
 
-Turnover is:
+Turnover is measured as:
 
-```text
-Turnover(t) = Σ_i |w'_i(t) - w'_i(t - 1)|
-```
+$$
+\mathrm{Turnover}(t)
+=
+\sum_{i=1}^{N}
+\left|
+w'_i(t)
+-
+w'_i(t-1)
+\right|
+$$
 
-The net return is:
+The net portfolio return is:
 
-```text
-R_net(t) = R_gross(t) - C × Turnover(t)
-```
+$$
+R_{\mathrm{net}}(t)
+=
+R_{\mathrm{gross}}(t)
+-
+C
+\cdot
+\mathrm{Turnover}(t)
+$$
 
 where:
 
-```text
-C = 10^-4
-```
+$$
+C
+=
+10^{-4}
+$$
 
 The complete DLS loss includes:
 
@@ -474,29 +663,251 @@ The complete DLS loss includes:
 
 The general objective is:
 
-```text
-L(θ) =
-- Sharpe(R_net)
-- λ_s Sortino(R_net)
-+ λ_dd Drawdown(R_net)
-+ λ_to Turnover
-+ λ_conc Concentration
-+ λ_inv Inventory
-+ λ_comm Commission
-+ λ_sp Sparsity
-```
+$$
+\mathcal{L}(\theta)
+=
+-
+\mathrm{Sharpe}
+\left(
+R_{\mathrm{net}}
+\right)
+-
+\lambda_s
+\mathrm{Sortino}
+\left(
+R_{\mathrm{net}}
+\right)
++
+\lambda_{\mathrm{dd}}
+\mathrm{Drawdown}
+\left(
+R_{\mathrm{net}}
+\right)
++
+\lambda_{\mathrm{to}}
+\mathrm{Turnover}
++
+\lambda_{\mathrm{conc}}
+\mathrm{Concentration}
++
+\lambda_{\mathrm{inv}}
+\mathrm{Inventory}
++
+\lambda_{\mathrm{comm}}
+\mathrm{Commission}
++
+\lambda_{\mathrm{sp}}
+\mathrm{Sparsity}
+$$
+
+The negative signs before Sharpe and Sortino mean that minimizing the loss maximizes these two reward terms.
+
+### Sharpe Term
+
+The Sharpe term is defined as:
+
+$$
+\mathrm{Sharpe}
+=
+\frac{
+\mu
+}{
+\sigma
++
+\varepsilon
+}
+$$
+
+where:
+
+$$
+\mu
+=
+\mathbb{E}
+\left[
+R_{\mathrm{net}}
+\right]
+$$
+
+and:
+
+$$
+\sigma
+=
+\sqrt{
+\mathbb{E}
+\left[
+R_{\mathrm{net}}^2
+\right]
+-
+\mu^2
+}
+$$
+
+### Sortino Term
+
+The downside return is:
+
+$$
+R_{\mathrm{down}}(t)
+=
+\max
+\left(
+-
+R_{\mathrm{net}}(t),
+0
+\right)
+$$
+
+The Sortino ratio is:
+
+$$
+\mathrm{Sortino}
+=
+\frac{
+\mathbb{E}
+\left[
+R_{\mathrm{net}}
+\right]
+}{
+\sqrt{
+\mathbb{E}
+\left[
+R_{\mathrm{down}}^2
+\right]
+}
++
+\varepsilon
+}
+$$
+
+### Drawdown Term
+
+The wealth path is:
+
+$$
+\mathrm{Wealth}(t)
+=
+\prod_{k=1}^{t}
+\left(
+1
++
+R_{\mathrm{net}}(k)
+\right)
+$$
+
+The running peak is:
+
+$$
+\mathrm{Peak}(t)
+=
+\max_{1 \leq k \leq t}
+\mathrm{Wealth}(k)
+$$
+
+The drawdown at time $t$ is:
+
+$$
+\mathrm{Drawdown}(t)
+=
+\frac{
+\mathrm{Peak}(t)
+-
+\mathrm{Wealth}(t)
+}{
+\mathrm{Peak}(t)
++
+\varepsilon
+}
+$$
+
+The drawdown penalty is:
+
+$$
+\mathrm{DD}
+=
+\max_t
+\mathrm{Drawdown}(t)
+$$
+
+### Concentration Penalty
+
+The concentration penalty is:
+
+$$
+\mathrm{Concentration}
+=
+\mathbb{E}_t
+\left[
+\sum_{i=1}^{N}
+w_i(t)^2
+\right]
+$$
+
+A larger value means that the portfolio is more concentrated in fewer assets.
+
+### Inventory Penalty
+
+The inventory penalty keeps the scaled gross exposure close to the target gross exposure:
+
+$$
+\mathrm{Inventory}
+=
+\mathbb{E}_t
+\left[
+\left(
+\sum_{i=1}^{N}
+\left|
+w'_i(t)
+\right|
+-
+G_{\mathrm{target}}
+\right)^2
+\right]
+$$
+
+where:
+
+$$
+G_{\mathrm{target}}
+=
+0.95
+$$
+
+### Commission Penalty
+
+The commission penalty is:
+
+$$
+\mathrm{Commission}
+=
+c_{\mathrm{comm}}
+\cdot
+\mathbb{E}_t
+\left[
+\mathrm{Turnover}(t)
+\right]
+$$
+
+where:
+
+$$
+c_{\mathrm{comm}}
+=
+10^{-4}
+$$
 
 ### Loss Coefficients
 
-| Component                 |      Symbol | Value |
-| ------------------------- | ----------: | ----: |
-| Sortino coefficient       |    `λ_s` |  0.25 |
-| Drawdown coefficient      |   `λ_dd` |  0.10 |
-| Turnover coefficient      |   `λ_to` |  2.00 |
-| Concentration coefficient | `λ_conc` |  0.01 |
-| Inventory coefficient     |  `λ_inv` |  0.02 |
-| Commission coefficient    | `λ_comm` |  2.00 |
-| Sparsity coefficient      |   `λ_sp` |  0.00 |
+| Component                 |                      Symbol | Value |
+| ------------------------- | --------------------------: | ----: |
+| Sortino coefficient       |               $\lambda_s$ |  0.25 |
+| Drawdown coefficient      |   $\lambda_{\mathrm{dd}}$ |  0.10 |
+| Turnover coefficient      |   $\lambda_{\mathrm{to}}$ |  2.00 |
+| Concentration coefficient | $\lambda_{\mathrm{conc}}$ |  0.01 |
+| Inventory coefficient     |  $\lambda_{\mathrm{inv}}$ |  0.02 |
+| Commission coefficient    | $\lambda_{\mathrm{comm}}$ |  2.00 |
+| Sparsity coefficient      |   $\lambda_{\mathrm{sp}}$ |  0.00 |
 
 ---
 
@@ -536,15 +947,19 @@ The execution engine applies:
 
 A stock is kept only if:
 
-```text
-confidence(t, i) ≥ 0.02
-```
+$$
+\mathrm{confidence}(t,i)
+\geq
+0.02
+$$
 
 and:
 
-```text
-signal_score(t, i) ≥ 0.00
-```
+$$
+\mathrm{signal\_score}(t,i)
+\geq
+0.00
+$$
 
 If too few assets pass this filter, the notebook falls back to top-confidence tradable assets.
 
@@ -702,3 +1117,9 @@ This branch adds:
 - technical report explaining the model and objective function.
 
 ---
+
+## 17. Notes
+
+Non-tradable assets are masked before applying softmax. Final weights are post-processed using execution constraints such as target gross exposure, maximum number of positions, minimum target weight, and minimum holdings.
+
+The dashboard is designed as a replay engine. It reconstructs the trading process from exported notebook outputs and helps inspect how signals are converted into target weights, trades, holdings, and portfolio-level metrics.
