@@ -2,7 +2,7 @@
 """
 Shifu DeepLOB + DLS Trading Engine Replay
 UI language: English only.
-Version: v10 daily model metrics comparison.
+Version: v13 hard-normalized DLS initial equity.
 
 This is intentionally not a CSV dashboard. It builds a replayable event/state
 machine from the exported notebook CSVs and visualizes the trading process as an
@@ -38,7 +38,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "data"
+DATA_DIR = DEFAULT_DATA_DIR if DEFAULT_DATA_DIR.exists() else Path(__file__).resolve().parent
+
+# Normalize the reconstructed DLS equity path so the first valid replay day
+# starts from the same 50M initial capital used by the backtest.
+INITIAL_DLS_EQUITY = 50_000_000.0
 
 FILES = {
     "comparison": "T001_comparison_original_deeplob_exact_vs_dls.csv",
@@ -550,9 +555,36 @@ def build_daily_summary(tables: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     if "target_gross" not in summary.columns:
         summary["target_gross"] = np.nan
     summary["engine_target_gross"] = summary["target_gross"].fillna(summary.get("target_gross_from_steps", np.nan)).fillna(0.95)
-    summary["dls_equity_proxy"] = summary.get("eod_market_value", np.nan) / summary["engine_target_gross"].replace(0, np.nan)
-    summary["dls_cash_proxy"] = summary["dls_equity_proxy"] - summary.get("eod_market_value", np.nan)
-    summary["dls_return_proxy_%"] = (summary["dls_equity_proxy"] / summary["dls_equity_proxy"].dropna().iloc[0] - 1.0) * 100 if summary["dls_equity_proxy"].notna().any() else np.nan
+
+    # Keep the replay table in chronological order BEFORE creating the DLS
+    # equity path. This removes any ambiguity from merge order and makes the
+    # first visible replay day the anchor for the 50M normalization.
+    summary = summary.sort_values("day_index").reset_index(drop=True)
+
+    # The exported DLS audit CSVs do not contain one official daily
+    # `portfolio_value` column. The dashboard therefore reconstructs a raw equity
+    # proxy from EOD holdings and target gross, then hard-normalizes the entire
+    # path so the first valid DLS replay value is exactly INITIAL_DLS_EQUITY
+    # (= 50,000,000). The first valid row is also explicitly overwritten to
+    # 50,000,000 so the status card and tables cannot display 49.7M on day one.
+    summary["dls_equity_proxy_raw"] = summary.get("eod_market_value", np.nan) / summary["engine_target_gross"].replace(0, np.nan)
+    summary["dls_equity_scale_factor"] = np.nan
+    summary["dls_equity_proxy"] = np.nan
+
+    first_valid_dls_idx = summary["dls_equity_proxy_raw"].first_valid_index()
+    if first_valid_dls_idx is not None:
+        first_dls_equity_proxy_raw = float(summary.loc[first_valid_dls_idx, "dls_equity_proxy_raw"])
+        if np.isfinite(first_dls_equity_proxy_raw) and first_dls_equity_proxy_raw != 0:
+            scale_factor = INITIAL_DLS_EQUITY / first_dls_equity_proxy_raw
+        else:
+            scale_factor = 1.0
+        summary["dls_equity_scale_factor"] = scale_factor
+        summary["dls_equity_proxy"] = summary["dls_equity_proxy_raw"] * scale_factor
+        summary.loc[first_valid_dls_idx, "dls_equity_proxy"] = INITIAL_DLS_EQUITY
+
+    summary["dls_eod_market_value_scaled"] = summary.get("eod_market_value", np.nan) * summary["dls_equity_scale_factor"]
+    summary["dls_cash_proxy"] = summary["dls_equity_proxy"] - summary["dls_eod_market_value_scaled"]
+    summary["dls_return_proxy_%"] = (summary["dls_equity_proxy"] / INITIAL_DLS_EQUITY - 1.0) * 100 if summary["dls_equity_proxy"].notna().any() else np.nan
     if "base_portfolio_value" in summary.columns and summary["base_portfolio_value"].notna().any():
         summary["base_return_%"] = (summary["base_portfolio_value"] / summary["base_portfolio_value"].dropna().iloc[0] - 1.0) * 100
     else:
@@ -1519,9 +1551,18 @@ def chart_daily_money_comparison(summary: pd.DataFrame, current_idx: int) -> go.
 # Tables and decision book
 # -----------------------------------------------------------------------------
 def build_decision_book(state: EngineState) -> pd.DataFrame:
+    """Build the asset-level decision book used by Decision Inspector and Execution Tape.
+
+    This table keeps the raw internal column names so charts and filters can still
+    use them. Display-only functions rename the columns into human-readable labels.
+    The important v11 addition is that the book now carries the complete DeepLOB
+    probability vector, the full weight transition, submitted order percentages,
+    and filled execution percentages in the same asset row.
+    """
     step = state.step.copy()
     if step.empty:
         return empty_df()
+
     cols = [
         "asset_id", "prob_down", "prob_flat", "prob_up", "signal_score", "confidence",
         "entry_candidate", "quality_candidate", "target_weight", "pre_trade_weight",
@@ -1530,33 +1571,87 @@ def build_decision_book(state: EngineState) -> pd.DataFrame:
     ]
     book = step[[c for c in cols if c in step.columns]].copy()
 
+    # Final end-of-day state from the DLS holding snapshot.
     if not state.holdings.empty:
         hcols = [c for c in ["asset_id", "shares", "close_price", "market_value", "eod_weight"] if c in state.holdings.columns]
         h = state.holdings[hcols].rename(columns={"shares": "eod_shares"})
         book = book.merge(h, on="asset_id", how="left")
-    if not state.trades.empty:
+
+    # Filled execution details from the DLS trade audit.
+    # order_percentage is the filled percentage, which is different from the submitted order percentage.
+    if not state.trades.empty and "asset_id" in state.trades.columns:
         tr = state.trades.copy()
-        buy = tr[tr["side"].astype(str).str.lower() == "buy"].groupby("asset_id").agg(executed_buy_shares=("shares", "sum"), executed_buy_turnover=("turnover", "sum"), buy_execution_price=("execution_price", "mean")).reset_index()
-        sell = tr[tr["side"].astype(str).str.lower() == "sell"].groupby("asset_id").agg(executed_sell_shares=("shares", "sum"), executed_sell_turnover=("turnover", "sum"), sell_execution_price=("execution_price", "mean")).reset_index()
+        if "side" not in tr.columns:
+            tr["side"] = ""
+        for c in ["shares", "turnover", "cost", "order_percentage", "execution_price"]:
+            if c not in tr.columns:
+                tr[c] = np.nan
+            tr[c] = pd.to_numeric(tr[c], errors="coerce")
+        side = tr["side"].astype(str).str.lower()
+        buy = tr[side == "buy"].groupby("asset_id").agg(
+            filled_buy_shares=("shares", "sum"),
+            filled_buy_pct=("order_percentage", "sum"),
+            filled_buy_turnover=("turnover", "sum"),
+            filled_buy_cost=("cost", "sum"),
+            buy_execution_price=("execution_price", "mean"),
+        ).reset_index()
+        sell = tr[side == "sell"].groupby("asset_id").agg(
+            filled_sell_shares=("shares", "sum"),
+            filled_sell_pct=("order_percentage", "sum"),
+            filled_sell_turnover=("turnover", "sum"),
+            filled_sell_cost=("cost", "sum"),
+            sell_execution_price=("execution_price", "mean"),
+        ).reset_index()
         book = book.merge(buy, on="asset_id", how="left").merge(sell, on="asset_id", how="left")
+
+    # Submitted DLS orders.
     if not state.dls_orders.empty:
         o = state.dls_orders[[c for c in ["asset_id", "buy_percentage", "sell_percentage"] if c in state.dls_orders.columns]].rename(columns={"buy_percentage": "dls_order_buy_pct", "sell_percentage": "dls_order_sell_pct"})
         book = book.merge(o, on="asset_id", how="left")
+
+    # Submitted Base DeepLOB orders.
     if not state.base_orders.empty:
         b = state.base_orders[[c for c in ["asset_id", "buy_percentage", "sell_percentage"] if c in state.base_orders.columns]].rename(columns={"buy_percentage": "base_order_buy_pct", "sell_percentage": "base_order_sell_pct"})
         book = book.merge(b, on="asset_id", how="left")
 
-    for c in ["buy_turnover", "sell_turnover", "executed_buy_turnover", "executed_sell_turnover", "target_weight", "post_trade_weight", "eod_weight"]:
+    numeric_cols = [
+        "prob_down", "prob_flat", "prob_up", "signal_score", "confidence",
+        "target_weight", "pre_trade_weight", "post_trade_weight", "eod_weight",
+        "buy_shares", "sell_shares", "buy_turnover", "sell_turnover", "buy_cost", "sell_cost",
+        "filled_buy_shares", "filled_sell_shares", "filled_buy_pct", "filled_sell_pct",
+        "filled_buy_turnover", "filled_sell_turnover", "filled_buy_cost", "filled_sell_cost",
+        "dls_order_buy_pct", "dls_order_sell_pct", "base_order_buy_pct", "base_order_sell_pct",
+    ]
+    for c in numeric_cols:
         if c in book.columns:
-            book[c] = pd.to_numeric(book[c], errors="coerce").fillna(0)
+            book[c] = pd.to_numeric(book[c], errors="coerce")
+
+    # Fill execution/order quantities with zero where the asset has no activity.
+    zero_cols = [
+        "buy_turnover", "sell_turnover", "buy_cost", "sell_cost",
+        "filled_buy_shares", "filled_sell_shares", "filled_buy_pct", "filled_sell_pct",
+        "filled_buy_turnover", "filled_sell_turnover", "filled_buy_cost", "filled_sell_cost",
+        "dls_order_buy_pct", "dls_order_sell_pct", "base_order_buy_pct", "base_order_sell_pct",
+    ]
+    for c in zero_cols:
+        if c in book.columns:
+            book[c] = book[c].fillna(0)
+
+    # Prefer the trade-audit filled turnover when it exists. Fall back to the step-audit turnover.
+    book["filled_total_turnover"] = book.get("filled_buy_turnover", 0) + book.get("filled_sell_turnover", 0)
+    step_turnover = book.get("buy_turnover", 0) + book.get("sell_turnover", 0)
+    book["engine_turnover"] = book["filled_total_turnover"].where(book["filled_total_turnover"].abs() > 0, step_turnover)
+
     book["engine_action"] = "HOLD"
-    if "buy_turnover" in book.columns:
-        book.loc[book["buy_turnover"] > 0, "engine_action"] = "BUY"
-    if "sell_turnover" in book.columns:
-        book.loc[book["sell_turnover"] > 0, "engine_action"] = "SELL"
-    book["engine_turnover"] = book.get("buy_turnover", 0) + book.get("sell_turnover", 0)
+    buy_signal = (book.get("filled_buy_turnover", 0) > 0) | (book.get("buy_turnover", 0) > 0) | (book.get("dls_order_buy_pct", 0) > 0)
+    sell_signal = (book.get("filled_sell_turnover", 0) > 0) | (book.get("sell_turnover", 0) > 0) | (book.get("dls_order_sell_pct", 0) > 0)
+    book.loc[buy_signal, "engine_action"] = "BUY"
+    book.loc[sell_signal, "engine_action"] = "SELL"
+
     book["abs_target_weight"] = pd.to_numeric(book.get("target_weight", 0), errors="coerce").abs()
-    book = book.sort_values(["engine_turnover", "abs_target_weight", "confidence"], ascending=False)
+    sort_cols = [c for c in ["engine_turnover", "abs_target_weight", "confidence"] if c in book.columns]
+    if sort_cols:
+        book = book.sort_values(sort_cols, ascending=False)
     return book
 
 
@@ -1568,18 +1663,47 @@ def display_table(df: pd.DataFrame, height: int = 390):
 
 
 def compact_book_view(book: pd.DataFrame, max_rows: int = 60) -> pd.DataFrame:
+    """Display-ready Decision Inspector table with explicit signal, weight and order columns."""
     if book.empty:
         return book
     cols = [
-        "asset_id", "engine_action", "prob_up", "signal_score", "confidence", "entry_candidate", "quality_candidate",
-        "target_weight", "pre_trade_weight", "post_trade_weight", "eod_weight", "engine_turnover", "buy_shares", "sell_shares",
-        "dls_order_buy_pct", "dls_order_sell_pct", "base_order_buy_pct", "base_order_sell_pct"
+        "asset_id", "engine_action",
+        "prob_down", "prob_flat", "prob_up", "signal_score", "confidence",
+        "entry_candidate", "quality_candidate",
+        "pre_trade_weight", "target_weight", "post_trade_weight", "eod_weight",
+        "dls_order_buy_pct", "dls_order_sell_pct", "filled_buy_pct", "filled_sell_pct",
+        "filled_buy_shares", "filled_sell_shares", "engine_turnover",
+        "base_order_buy_pct", "base_order_sell_pct",
     ]
     out = book[[c for c in cols if c in book.columns]].copy().head(max_rows)
-    for c in ["prob_up", "signal_score", "confidence", "target_weight", "pre_trade_weight", "post_trade_weight", "eod_weight", "dls_order_buy_pct", "dls_order_sell_pct", "base_order_buy_pct", "base_order_sell_pct"]:
-        if c in out.columns:
-            out[c] = pd.to_numeric(out[c], errors="coerce")
-    return out
+    numeric_cols = [c for c in out.columns if c not in ["asset_id", "engine_action", "entry_candidate", "quality_candidate"]]
+    for c in numeric_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    rename = {
+        "asset_id": "Asset",
+        "engine_action": "Engine action",
+        "prob_down": "DeepLOB P(down)",
+        "prob_flat": "DeepLOB P(flat)",
+        "prob_up": "DeepLOB P(up)",
+        "signal_score": "Signal score",
+        "confidence": "Confidence",
+        "entry_candidate": "Entry passed",
+        "quality_candidate": "Quality passed",
+        "pre_trade_weight": "Previous weight",
+        "target_weight": "DLS predicted target weight",
+        "post_trade_weight": "Post-trade weight",
+        "eod_weight": "Final EOD weight",
+        "dls_order_buy_pct": "DLS submitted buy %",
+        "dls_order_sell_pct": "DLS submitted sell %",
+        "filled_buy_pct": "Filled buy %",
+        "filled_sell_pct": "Filled sell %",
+        "filled_buy_shares": "Filled buy shares",
+        "filled_sell_shares": "Filled sell shares",
+        "engine_turnover": "Executed turnover",
+        "base_order_buy_pct": "Base submitted buy %",
+        "base_order_sell_pct": "Base submitted sell %",
+    }
+    return out.rename(columns=rename)
 
 
 def explain_asset(book: pd.DataFrame, asset: str) -> str:
@@ -1592,18 +1716,30 @@ def explain_asset(book: pd.DataFrame, asset: str) -> str:
     action = str(r.get("engine_action", "HOLD"))
     icon = "BUY" if action == "BUY" else "SELL" if action == "SELL" else "HOLD"
     lines = [f"[{icon}] Asset {asset}"]
-    lines.append(f"Signal: P(up)={num(r.get('prob_up'), 4)}, signal_score={num(r.get('signal_score'), 4)}, confidence={num(r.get('confidence'), 4)}")
+    lines.append(
+        "Signals: "
+        f"P(down)={num(r.get('prob_down'), 4)}, "
+        f"P(flat)={num(r.get('prob_flat'), 4)}, "
+        f"P(up)={num(r.get('prob_up'), 4)}, "
+        f"signal_score={num(r.get('signal_score'), 4)}, confidence={num(r.get('confidence'), 4)}"
+    )
     lines.append(f"Filter: entry={r.get('entry_candidate', '—')}, quality={r.get('quality_candidate', '—')}")
-    lines.append(f"Weights: pre={pct(r.get('pre_trade_weight'), 3)}, target={pct(r.get('target_weight'), 3)}, post={pct(r.get('post_trade_weight'), 3)}, EOD={pct(r.get('eod_weight'), 3)}")
-    if action == "BUY":
-        lines.append(f"Execution: bought {num(r.get('buy_shares'), 0)} shares, turnover={money(r.get('buy_turnover'))}")
-    elif action == "SELL":
-        lines.append(f"Execution: sold {num(r.get('sell_shares'), 0)} shares, turnover={money(r.get('sell_turnover'))}")
-    else:
-        gap = r.get("weight_gap_before_trade", np.nan)
-        lines.append(f"Execution: no trade; pre-target gap before trade={pct(gap, 3)}")
-    if pd.notna(r.get("dls_order_buy_pct", np.nan)) or pd.notna(r.get("dls_order_sell_pct", np.nan)):
-        lines.append(f"DLS submitted order: buy={pct(r.get('dls_order_buy_pct'), 3)}, sell={pct(r.get('dls_order_sell_pct'), 3)}")
+    lines.append(
+        "Weights: "
+        f"previous={pct(r.get('pre_trade_weight'), 3)}, "
+        f"DLS target={pct(r.get('target_weight'), 3)}, "
+        f"post-trade={pct(r.get('post_trade_weight'), 3)}, "
+        f"final EOD={pct(r.get('eod_weight'), 3)}"
+    )
+    lines.append(
+        "Submitted DLS order: "
+        f"buy={pct(r.get('dls_order_buy_pct'), 3)}, sell={pct(r.get('dls_order_sell_pct'), 3)}"
+    )
+    lines.append(
+        "Filled execution: "
+        f"buy={pct(r.get('filled_buy_pct'), 3)} / {num(r.get('filled_buy_shares'), 0)} shares, "
+        f"sell={pct(r.get('filled_sell_pct'), 3)} / {num(r.get('filled_sell_shares'), 0)} shares"
+    )
     if pd.notna(r.get("base_order_buy_pct", np.nan)) or pd.notna(r.get("base_order_sell_pct", np.nan)):
         lines.append(f"Base submitted order: buy={pct(r.get('base_order_buy_pct'), 3)}, sell={pct(r.get('base_order_sell_pct'), 3)}")
     return "\n".join(lines)
@@ -1702,7 +1838,7 @@ def chart_execution_by_side(state: EngineState) -> go.Figure:
 
 
 def build_execution_reconciliation(state: EngineState) -> pd.DataFrame:
-    """Combine filled trades, DLS orders, base orders, and DLS decision state into one table."""
+    """Display-ready execution table combining signals, weights, orders and fills."""
     book = build_decision_book(state)
     diff = build_order_diff(state)
     if book.empty and diff.empty:
@@ -1712,31 +1848,91 @@ def build_execution_reconciliation(state: EngineState) -> pd.DataFrame:
     else:
         out = book.copy()
         if not diff.empty:
-            out = out.merge(diff[[c for c in ["asset_id", "dls_net_order", "base_net_order", "order_delta", "order_overlap", "direction_case"] if c in diff.columns]], on="asset_id", how="outer")
-    for c in ["engine_turnover", "target_weight", "prob_up", "confidence", "dls_net_order", "base_net_order", "order_delta"]:
+            merge_cols = [c for c in ["asset_id", "dls_net_order", "base_net_order", "order_delta", "order_overlap", "direction_case"] if c in diff.columns]
+            out = out.merge(diff[merge_cols], on="asset_id", how="outer")
+
+    numeric_needed = [
+        "prob_down", "prob_flat", "prob_up", "confidence", "pre_trade_weight", "target_weight", "post_trade_weight", "eod_weight",
+        "dls_order_buy_pct", "dls_order_sell_pct", "filled_buy_pct", "filled_sell_pct",
+        "dls_net_order", "base_net_order", "order_delta", "filled_buy_shares", "filled_sell_shares",
+        "buy_execution_price", "sell_execution_price", "filled_buy_turnover", "filled_sell_turnover",
+        "filled_buy_cost", "filled_sell_cost", "engine_turnover", "base_order_buy_pct", "base_order_sell_pct",
+    ]
+    for c in numeric_needed:
         if c not in out.columns:
             out[c] = 0
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+
     if "engine_action" not in out.columns:
         out["engine_action"] = np.where(out.get("order_delta", 0).abs() > 0, "ORDER", "HOLD")
+    if "order_overlap" not in out.columns:
+        out["order_overlap"] = "—"
+    if "direction_case" not in out.columns:
+        out["direction_case"] = "—"
+
     active = out[
         (out["engine_action"].astype(str) != "HOLD")
         | (out["engine_turnover"].abs() > 0)
         | (out["dls_net_order"].abs() > 0)
         | (out["base_net_order"].abs() > 0)
         | (out["target_weight"].abs() > 0)
+        | (out["filled_buy_pct"].abs() > 0)
+        | (out["filled_sell_pct"].abs() > 0)
     ].copy()
     if active.empty:
         active = out.copy()
-    active["sort_key"] = active["engine_turnover"].abs() + active["order_delta"].abs() * 1e6 + active["target_weight"].abs() * 1e5
+
+    active["sort_key"] = (
+        active["engine_turnover"].abs()
+        + active["order_delta"].abs() * 1e6
+        + active["target_weight"].abs() * 1e5
+        + active["filled_buy_pct"].abs() * 1e4
+        + active["filled_sell_pct"].abs() * 1e4
+    )
     cols = [
-        "asset_id", "engine_action", "prob_up", "confidence", "entry_candidate", "quality_candidate",
-        "target_weight", "pre_trade_weight", "post_trade_weight", "eod_weight",
+        "asset_id", "engine_action",
+        "prob_down", "prob_flat", "prob_up", "confidence",
+        "pre_trade_weight", "target_weight", "post_trade_weight", "eod_weight",
+        "dls_order_buy_pct", "dls_order_sell_pct", "filled_buy_pct", "filled_sell_pct",
         "dls_net_order", "base_net_order", "order_delta", "order_overlap", "direction_case",
-        "executed_buy_shares", "executed_sell_shares", "buy_execution_price", "sell_execution_price",
-        "engine_turnover", "buy_cost", "sell_cost",
+        "filled_buy_shares", "filled_sell_shares", "buy_execution_price", "sell_execution_price",
+        "filled_buy_turnover", "filled_sell_turnover", "filled_buy_cost", "filled_sell_cost", "engine_turnover",
+        "base_order_buy_pct", "base_order_sell_pct",
     ]
-    return active.sort_values("sort_key", ascending=False)[[c for c in cols if c in active.columns]].head(90)
+    show = active.sort_values("sort_key", ascending=False)[[c for c in cols if c in active.columns]].head(90).copy()
+    rename = {
+        "asset_id": "Asset",
+        "engine_action": "Engine action",
+        "prob_down": "DeepLOB P(down)",
+        "prob_flat": "DeepLOB P(flat)",
+        "prob_up": "DeepLOB P(up)",
+        "confidence": "Confidence",
+        "pre_trade_weight": "Previous weight",
+        "target_weight": "DLS predicted target weight",
+        "post_trade_weight": "Post-trade weight",
+        "eod_weight": "Final EOD weight",
+        "dls_order_buy_pct": "DLS submitted buy %",
+        "dls_order_sell_pct": "DLS submitted sell %",
+        "filled_buy_pct": "Filled buy %",
+        "filled_sell_pct": "Filled sell %",
+        "dls_net_order": "DLS net order %",
+        "base_net_order": "Base net order %",
+        "order_delta": "DLS minus Base order %",
+        "order_overlap": "Order overlap",
+        "direction_case": "Direction case",
+        "filled_buy_shares": "Filled buy shares",
+        "filled_sell_shares": "Filled sell shares",
+        "buy_execution_price": "Buy execution price",
+        "sell_execution_price": "Sell execution price",
+        "filled_buy_turnover": "Buy turnover",
+        "filled_sell_turnover": "Sell turnover",
+        "filled_buy_cost": "Buy cost",
+        "filled_sell_cost": "Sell cost",
+        "engine_turnover": "Total executed turnover",
+        "base_order_buy_pct": "Base submitted buy %",
+        "base_order_sell_pct": "Base submitted sell %",
+    }
+    return show.rename(columns=rename)
 
 
 def chart_replay_efficiency(summary: pd.DataFrame, current_idx: int) -> go.Figure:
@@ -1854,7 +2050,7 @@ with st.sidebar:
         ],
         index=0,
     )
-    st.caption("v10 uses explained minimal rendering: each view keeps only decision-useful charts and combined tables.")
+    st.caption("v13 uses explained minimal rendering and hard-normalizes the DLS equity path to ¥50M on the first valid replay day.")
 
 state = get_state(tables, summary, current_idx)
 
@@ -1876,7 +2072,7 @@ st.markdown(
     f"""
     <div class="status-grid">
       <div class="status-card"><div class="status-label">Engine Clock</div><div class="status-value">{state.day}</div><div class="status-note">signal day {r.get('signal_day_id', '—')}</div></div>
-      <div class="status-card"><div class="status-label">DLS Equity Proxy</div><div class="status-value">{money(r.get('dls_equity_proxy'))}</div><div class="status-note">from holdings / target gross</div></div>
+      <div class="status-card"><div class="status-label">DLS Equity Proxy</div><div class="status-value">{money(r.get('dls_equity_proxy'))}</div><div class="status-note">normalized to ¥50M initial capital</div></div>
       <div class="status-card"><div class="status-label">Return Proxy</div><div class="status-value">{pct(r.get('dls_return_proxy_%'), 2, already_percent=True)}</div><div class="status-note">DLS replay path</div></div>
       <div class="status-card"><div class="status-label">Target Gross</div><div class="status-value">{pct(r.get('engine_target_gross'), 2)}</div><div class="status-note">optimizer exposure</div></div>
       <div class="status-card"><div class="status-label">Executed Turnover</div><div class="status-value">{money(r.get('executed_total_turnover'))}</div><div class="status-note">buy + sell notional</div></div>
@@ -1972,7 +2168,7 @@ elif view == "🧠 Decision Inspector":
         "This is the asset-level decision book. Use it to answer: which assets had strong signals, which passed filters, which received target weights, and which were actually bought or sold. Tables are combined so the full decision chain is visible in one row per asset."
     )
     book = build_decision_book(state)
-    st.markdown("<div class='panel'><div class='panel-title'>🧠 Combined Decision Book</div><div class='panel-sub'>Signal → filter → target weight → execution → EOD holding → DLS/Base order comparison. This replaces multiple fragmented asset tables.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='panel'><div class='panel-title'>🧠 Combined Decision Book</div><div class='panel-sub'>Full chain per asset: DeepLOB P(down/flat/up) → filters → previous/target/post/EOD weights → submitted order % → filled execution %.</div>", unsafe_allow_html=True)
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
         action_filter = st.selectbox("Action filter", ["All", "BUY", "SELL", "HOLD"], index=0)
@@ -2027,7 +2223,7 @@ elif view == "📟 Execution Tape":
     st.plotly_chart(chart_execution_by_side(state), use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='panel'><div class='panel-title'>🧾 Execution & Order Reconciliation Table</div><div class='panel-sub'>Combined table: DLS decision, DLS submitted order, base submitted order, order delta, filled shares, execution price and turnover.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='panel'><div class='panel-title'>🧾 Execution & Order Reconciliation Table</div><div class='panel-sub'>Execution audit per asset: three DeepLOB probabilities, previous/target/post/EOD weights, submitted buy/sell %, filled buy/sell %, shares, prices and costs.</div>", unsafe_allow_html=True)
     display_table(build_execution_reconciliation(state), height=520)
     st.markdown("</div>", unsafe_allow_html=True)
 
