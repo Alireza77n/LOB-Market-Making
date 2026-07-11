@@ -1,5 +1,4 @@
 # Asset Allocation Module — DeepLOB + DLS
-
 ## 1. Overview
 
 This branch adds an **Asset Allocation** module to the `LOB-Market-Making` repository.
@@ -29,6 +28,13 @@ Execution / Backtest Engine
         ↓
 Portfolio Metrics + Dashboard Replay
 ```
+
+---
+
+
+### Executed notebook result snapshot
+
+The latest executed notebook run uses an initial capital of **RMB 50,000,000** and evaluates the strategy over **242 out-of-sample days** from **D485 to D726**. The selected DLS seed is **33**. In this run, `DeepLOB + DLS` reaches a final value of approximately **RMB 73.05M**, equivalent to a **46.11%** total return.
 
 ---
 
@@ -65,13 +71,21 @@ LOB-Market-Making/
 
 ### Path
 
+Repository path:
+
 ```text
 analysis/notebooks/asset_allocation/deeplob_dls_asset_allocation.ipynb
 ```
 
+Executed notebook filename used for the latest README update:
+
+```text
+deeplob-dls-version1.ipynb
+```
+
 ### Description
 
-This notebook contains the full DeepLOB + DLS asset allocation workflow.
+This notebook contains the full DeepLOB + DLS asset allocation workflow. The latest version is configured as a **Kaggle Edition** notebook: it searches attached datasets under `/kaggle/input`, writes artifacts under `/kaggle/working/shifu_dls_oos/`, and packages outputs into `/kaggle/working/shifu_dls_oos_results.zip`.
 
 Main tasks implemented in the notebook:
 
@@ -145,7 +159,9 @@ The dashboard visualizes:
 - portfolio value path;
 - drawdown behavior;
 - turnover behavior;
-- comparison between DeepLOB-only and DeepLOB + DLS.
+- comparison between DeepLOB-only and DeepLOB + DLS;
+- normalized DLS equity replay starting from **RMB 50,000,000** for fair visual comparison with the baseline;
+- expanded asset-level audit tables showing `P(down)`, `P(flat)`, `P(up)`, previous weight, DLS target weight, post-trade weight, final EOD weight, submitted order percentages, and filled execution percentages.
 
 ### Dashboard Data Folder
 
@@ -159,7 +175,7 @@ dashboard/asset_allocation/data/
 
 ## 6. Data Used in the Notebook
 
-The notebook is designed for a Colab/Kaggle-style workflow.
+The notebook is designed for a Kaggle-first workflow. It can be inspected elsewhere, but the executed version assumes Kaggle inputs under `/kaggle/input` and writes results under `/kaggle/working/shifu_dls_oos/`.
 
 The main input files are:
 
@@ -170,6 +186,16 @@ The main input files are:
 | `daily_data_release_stage_out_of_sample.parquet` | Out-of-sample daily OHLCV data used for final backtesting     |
 | `lob_data_release_stage_out_of_sample.parquet`   | Out-of-sample LOB data used for out-of-sample DeepLOB signals |
 | `best_model_alpha_0015.pt`                       | Pretrained DeepLOB checkpoint                                 |
+
+
+Kaggle input setup used by the executed notebook:
+
+```text
+/kaggle/input/datasets/arshiaabolghasemi/feishu-dataset/
+/kaggle/input/models/.../best_model_alpha_0015.pt
+```
+
+The notebook recursively searches `/kaggle/input`, so the exact attached dataset folder name does not need to match the examples as long as the required filenames are present.
 
 Executed notebook data summary:
 
@@ -597,13 +623,15 @@ R_{\mathrm{future}}(t,i)
 1
 ```
 
-This convention prevents the model from using future information when making trading decisions.
+This convention prevents the model from using future information when making trading decisions. In the latest notebook, the DLS strategy uses `sell_mode = "open"` and `decision_price_mode = "open"` so that same-day close is reserved for end-of-day valuation and metric logging rather than same-day execution sizing.
 
 ---
 
 ## 9. DLS Objective Function
 
 DLS is trained using a portfolio-level objective function.
+
+In the latest notebook, DLS return labels are clipped to the interval `[-0.70, 0.70]` before training to reduce the impact of extreme return outliers.
 
 Instead of using a classification loss, the model is trained based on the financial quality of the generated portfolio returns.
 
@@ -1023,25 +1051,31 @@ The final DeepLOB + DLS model was evaluated on the out-of-sample period.
 | Win rate                 |         53.72% |
 | Average holdings per day |          235.3 |
 
+Final value calculation:
+
+```text
+RMB 50,000,000 × (1 + 46.108466%) ≈ RMB 73,054,233
+```
+
 ---
 
 ## 13. Baseline Comparison
 
 The notebook compares the final DLS strategy with the original DeepLOB-only baseline.
 
-| Model                       | Total Return | Sharpe | Max Drawdown | Score Proxy | Avg Holdings |
-| --------------------------- | -----------: | -----: | -----------: | ----------: | -----------: |
-| Original DeepLOB-only exact |       41.16% |   0.97 |      -24.91% |       15.19 |        692.7 |
-| DeepLOB + DLS               |       46.11% |   1.20 |      -15.77% |       20.41 |        235.3 |
+| Model                       | Total Return | CAGR | Sharpe | Max Drawdown | Score Proxy | Total Costs | Avg Daily Turnover | Win Rate | Avg Holdings |
+| --------------------------- | -----------: | ---: | -----: | -----------: | ----------: | ----------: | -----------------: | -------: | -----------: |
+| Original DeepLOB-only exact |       40.88% | 40.88% |   0.96 |      -24.91% |       15.05 | RMB 2.10M | RMB 22.94M | 53.72% |        692.7 |
+| DeepLOB + DLS               |       46.11% | 46.11% |   1.20 |      -15.77% |       20.41 | RMB 3.08M | RMB 36.29M | 53.72% |        235.3 |
 
 Compared with the original DeepLOB-only baseline, the DeepLOB + DLS model achieved:
 
-- higher total return;
-- higher Sharpe ratio;
-- lower maximum drawdown;
-- better score proxy;
-- fewer average holdings;
-- more controlled portfolio allocation.
+- **+5.23 percentage points** higher total return (`46.11%` vs `40.88%`);
+- higher Sharpe ratio (`1.20` vs `0.96`);
+- less severe maximum drawdown (`-15.77%` vs `-24.91%`);
+- higher score proxy (`20.41` vs `15.05`);
+- much lower average holdings (`235.3` vs `692.7`), meaning a more selective portfolio;
+- higher transaction costs and turnover, which should be interpreted as the cost of the more active DLS reallocation process.
 
 ---
 
@@ -1053,13 +1087,27 @@ The notebook generates the following output files:
 | -------------------------------------------------------- | -------------------------------- |
 | `shifu_dls_model_locked_best_seed.pt`                  | Final selected DLS checkpoint    |
 | `shifu_dls_seed_search_summary.csv`                    | Seed-search result summary       |
+| `shifu_dls_training_history_oos.csv`                   | DLS train/validation history     |
 | `T001_dls_weight_debug_shifted_tplus2_conf_filter.csv` | DLS daily diagnostics            |
 | `T001_dls_weights_long_shifted_tplus2.csv`             | Long-format DLS target weights   |
 | `T001_dls_trade_audit.csv`                             | Executed trade audit             |
 | `T001_dls_weight_step_audit.csv`                       | Weight adjustment audit          |
 | `T001_dls_holding_snapshot_audit.csv`                  | Holdings snapshot audit          |
-| `T001_oos_shifu_dls_colab_sell_open.csv`               | Final DLS submission / trade log |
+| `T001_oos_shifu_dls_kaggle_sell_open.csv`              | Final Kaggle DLS submission / trade log |
+| `T001_oos_original_deeplob_exact_sell_close.csv`       | Original DeepLOB-only baseline submission / trade log |
+| `T001_original_deeplob_exact_raw_oos_signals.csv`      | Original DeepLOB baseline raw probabilities and signals |
+| `T001_original_deeplob_exact_daily_log.csv`            | Original DeepLOB baseline daily portfolio log |
 | `T001_comparison_original_deeplob_exact_vs_dls.csv`    | Baseline comparison table        |
+| `backtest_report_shifu_dls_shifted_tplus2_conf_filter.png` | Static DLS backtest report chart |
+| `dls_weight_distribution_Wt.png`                       | DLS target-weight distribution chart |
+
+The final Kaggle output archive is created at:
+
+```text
+/kaggle/working/shifu_dls_oos_results.zip
+```
+
+In the executed notebook, the archive size is approximately **174.29 MB**.
 
 Final trade log summary:
 
@@ -1083,6 +1131,25 @@ The dashboard expects CSV outputs in:
 
 ```text
 dashboard/asset_allocation/data/
+```
+
+
+### Dashboard equity normalization
+
+The Streamlit replay dashboard should display the DLS equity path normalized to the same starting capital used by the notebook:
+
+```text
+Initial DLS equity = RMB 50,000,000
+```
+
+The raw DLS equity proxy is reconstructed from holdings and target gross exposure, but the dashboard rescales the DLS path so that the first valid replay value is exactly `50,000,000`. This keeps the visual comparison against the original DeepLOB baseline consistent with the notebook metrics.
+
+Conceptually:
+
+```text
+dls_equity_proxy_raw = eod_market_value / engine_target_gross
+scale_factor = 50,000,000 / first_valid_dls_equity_proxy_raw
+dls_equity_proxy = dls_equity_proxy_raw × scale_factor
 ```
 
 Required Python packages:
@@ -1114,12 +1181,46 @@ This branch adds:
 - out-of-sample backtest;
 - comparison with DeepLOB-only baseline;
 - Streamlit replay dashboard;
+- normalized dashboard DLS equity path starting from RMB 50M;
+- expanded dashboard decision/execution tables with DeepLOB three-class probabilities, previous weights, target weights, final weights, submitted order percentages, and filled execution percentages;
+- Kaggle-ready output packaging;
 - technical report explaining the model and objective function.
 
 ---
 
 ## 17. Notes
 
-Non-tradable assets are masked before applying softmax. Final weights are post-processed using execution constraints such as target gross exposure, maximum number of positions, minimum target weight, and minimum holdings.
+Non-tradable assets are masked before applying softmax. Final weights are post-processed using execution constraints such as target gross exposure, maximum number of positions, minimum target weight, minimum holdings, rebalance band, lot size, transaction costs, and cash buffer.
 
-The dashboard is designed as a replay engine. It reconstructs the trading process from exported notebook outputs and helps inspect how signals are converted into target weights, trades, holdings, and portfolio-level metrics.
+The dashboard is designed as a replay engine. It reconstructs the trading process from exported notebook outputs and helps inspect how signals are converted into target weights, submitted orders, filled executions, holdings, and portfolio-level metrics.
+
+The latest notebook and dashboard should be interpreted together:
+
+- the notebook reports official OOS metrics from an initial capital of RMB 50M;
+- the dashboard reconstructs the DLS replay state from exported CSVs;
+- the dashboard DLS equity proxy is normalized to start at RMB 50M so that same-day and cumulative comparisons align visually with the notebook metric convention.
+
+
+---
+
+## 18. Latest Update Summary
+
+This README has been updated for the latest notebook results.
+
+Key updates:
+
+| Area | Updated detail |
+| ---- | -------------- |
+| Notebook mode | Kaggle Edition with input discovery under `/kaggle/input`. |
+| Initial capital | RMB 50,000,000. |
+| OOS period | D485 to D726, 242 metric days. |
+| Selected DLS seed | 33. |
+| DLS final value | Approximately RMB 73.05M. |
+| DLS total return | 46.11%. |
+| Original DeepLOB-only total return | 40.88%. |
+| DLS Sharpe | 1.20. |
+| Original DeepLOB-only Sharpe | 0.96. |
+| DLS max drawdown | -15.77%. |
+| Original DeepLOB-only max drawdown | -24.91%. |
+| Final DLS submission file | `T001_oos_shifu_dls_kaggle_sell_open.csv`. |
+| Dashboard equity convention | DLS equity replay is normalized to start from RMB 50M. |
