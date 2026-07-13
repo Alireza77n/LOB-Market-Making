@@ -2086,7 +2086,7 @@ st.markdown(
 st.markdown(
     f"""
     <div class="stage-line">
-      <div class="stage-box"><div class="stage-num">01</div><div class="stage-title">Signal Bus</div><div class="stage-main">{num(r.get('raw_buy_signals'),0)}</div><div class="stage-sub">buy signals from {num(r.get('raw_assets'),0)} assets</div></div>
+      <div class="stage-box"><div class="stage-num">01</div><div class="stage-title">Signal Bus</div><div class="stage-main">{num(r.get('raw_assets', r.get('asset_universe', 0)),0)}</div><div class="stage-sub">all DeepLOB signals | up={num(r.get('raw_buy_signals'),0)} flat={num(r.get('raw_flat_signals'),0)} down={num(r.get('raw_sell_signals'),0)}</div></div>
       <div class="stage-box"><div class="stage-num">02</div><div class="stage-title">Entry Mask</div><div class="stage-main">{num(r.get('entry_candidates'),0)}</div><div class="stage-sub">candidate assets</div></div>
       <div class="stage-box"><div class="stage-num">03</div><div class="stage-title">Quality Filter</div><div class="stage-main">{num(r.get('quality_candidates'),0)}</div><div class="stage-sub">pass rate {pct(r.get('quality_pass_rate'),1)}</div></div>
       <div class="stage-box"><div class="stage-num">04</div><div class="stage-title">DLS Optimizer</div><div class="stage-main">{num(r.get('target_names'),0)}</div><div class="stage-sub">target names</div></div>
