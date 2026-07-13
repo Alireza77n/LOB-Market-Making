@@ -261,15 +261,37 @@ The notebook uses a shifted, no-lookahead convention for the DLS pipeline. A Dee
 
 #### 1. `Signal Bus`
 
-`Signal Bus` is the raw DeepLOB prediction layer.
+`Signal Bus` is the raw DeepLOB prediction layer and represents the full DeepLOB signal universe for the selected replay day.
 
-At this stage, the model has not yet made a portfolio allocation. It has only produced directional probabilities for each asset:
+At this stage, no portfolio allocation has been made yet. The model has only produced a three-class probability vector for each asset:
 
 ```text
 P(down), P(flat), P(up)
 ```
 
-These probabilities come from the three-class DeepLOB output. They describe whether the model expects the asset to move down, remain flat, or move up. The notebook then derives two important signal features from these probabilities:
+These probabilities come from the DeepLOB classification output:
+
+* `P(down)` is the probability that the asset will move downward.
+* `P(flat)` is the probability that the asset will remain approximately flat or have no meaningful directional move.
+* `P(up)` is the probability that the asset will move upward.
+
+The dashboard’s `Signal Bus` number shows the total number of assets for which DeepLOB produced a usable signal/probability vector on the selected replay day. In other words:
+
+```text
+Signal Bus = all raw DeepLOB signal rows available for the current day
+```
+
+The subtitle then breaks this full signal universe into directional groups:
+
+```text
+up signals   = assets where the DeepLOB signal is bullish
+flat signals = assets where the DeepLOB signal is neutral
+down signals = assets where the DeepLOB signal is bearish
+```
+
+Therefore, `Signal Bus` should be interpreted as the starting universe of model predictions, not as the number of buy orders and not as the final trading universe.
+
+The notebook then derives two additional signal features from the three DeepLOB probabilities:
 
 ```text
 signal_score = P(up) - P(down)
@@ -279,43 +301,107 @@ confidence = |signal_score| × (1 - P(flat))
 
 The interpretation is:
 
-* `P(up)` measures bullish probability.
-* `P(down)` measures bearish probability.
-* `P(flat)` measures uncertainty or no-direction probability.
-* `signal_score` measures directional strength.
-* `confidence` rewards signals that are both directional and not too flat.
+| Feature        | Meaning                                                                                                                                               |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `P(up)`        | Bullish probability from DeepLOB.                                                                                                                     |
+| `P(down)`      | Bearish probability from DeepLOB.                                                                                                                     |
+| `P(flat)`      | Neutral/no-direction probability. High `P(flat)` means the model is less directionally confident.                                                     |
+| `signal_score` | Directional strength. Positive values indicate more bullish than bearish probability; negative values indicate more bearish than bullish probability. |
+| `confidence`   | Directional confidence. It becomes high only when the signal is directional and `P(flat)` is low.                                                     |
 
-The number shown in this stage represents how many raw DeepLOB buy-side signals are available on the current replay day, while the subtitle shows the broader raw signal universe. This is the widest part of the funnel. It tells you how much signal supply the model produced before any portfolio or execution logic was applied.
+This stage answers:
 
-A high `Signal Bus` value means DeepLOB was broadly bullish across many assets. A low value means the raw model was more selective or that fewer assets had usable bullish predictions.
+```text
+What did DeepLOB predict before any portfolio, tradability, or execution rule was applied?
+```
 
-This stage does **not** mean those assets will be bought. It only means the model produced raw signal candidates.
+A large `Signal Bus` value means many assets have valid DeepLOB predictions on that day. It does **not** mean all of those assets will be traded. It only means that DeepLOB produced a raw prediction for them.
+
+This distinction is important:
+
+```text
+Signal Bus = prediction availability
+Entry Mask = execution/tradability eligibility
+Quality Filter = signal strength requirement
+DLS Optimizer = portfolio allocation decision
+```
+
+So an asset can appear in `Signal Bus` but still be removed later because it is not tradable, has weak confidence, fails the quality filter, receives zero target weight, or does not require a rebalance trade.
 
 ---
 
 #### 2. `Entry Mask`
 
-`Entry Mask` is the first execution-aware gate.
+`Entry Mask` is the first execution-aware gate after the raw DeepLOB prediction layer.
 
-The notebook separates prediction from tradability. Even if DeepLOB produces a strong signal, the asset still needs to be eligible for trading on the actual trade day. The entry mask represents this tradability/eligibility condition for the execution day.
+DeepLOB may produce a probability vector for an asset, but that does not automatically mean the asset can be traded on the execution day. The entry mask checks whether the asset is actually eligible to enter the trading/allocation pipeline.
 
-This stage is important because the DLS model must not use future information to decide which assets are tradable. The notebook explicitly keeps the entry mask tied to information available before the trade is executed. Future return information can be used later for labels or loss validation, but not to decide whether an asset is allowed into the optimizer.
+Conceptually:
 
-The number in this box shows how many assets passed the initial entry condition and can move forward into the DLS allocation pipeline.
+```text
+Entry Mask = assets that are tradable and have valid entry information
+```
+
+In the shifted no-lookahead convention of the notebook, the signal is generated on signal day `t`, and the trade is applied on the next trade day. Therefore, the entry condition is tied to the execution day, not to future outcome information.
+
+A simplified mathematical form is:
+
+```text
+m_i^{entry}(t) = 1
+if asset i has valid tradability and valid entry price on the execution day
+
+m_i^{entry}(t) = 0
+otherwise
+```
+
+More explicitly:
+
+```text
+m_i^{entry}(t) = 1
+if valid_mask_i(t+1) = 1
+and entry_price_i(t+1) is finite
+and entry_price_i(t+1) > 0
+```
+
+Otherwise:
+
+```text
+m_i^{entry}(t) = 0
+```
+
+This means the entry mask is not mainly a prediction-quality filter. It does not ask whether the signal is strong. Instead, it asks:
+
+```text
+Can this asset be considered for trading on the execution day?
+```
+
+The number shown in the `Entry Mask` box is the number of assets that passed this initial eligibility/tradability check.
 
 Interpretation:
 
-* If `Signal Bus` is high but `Entry Mask` is much lower, many raw signals were not tradable or not eligible.
-* If `Signal Bus` and `Entry Mask` are close, most raw signal candidates were eligible for the next step.
-* Passing the entry mask still does not guarantee a trade; it only means the asset is allowed to be considered.
+* If `Signal Bus` is much larger than `Entry Mask`, many assets had DeepLOB predictions but were not eligible for trading.
+* If `Signal Bus` and `Entry Mask` are close, most assets with DeepLOB signals were tradable.
+* Passing the entry mask does not mean the asset will be bought or sold. It only means the asset is allowed to move forward into the DLS allocation pipeline.
+
+This stage is necessary because a realistic trading engine must separate **prediction availability** from **execution eligibility**.
+
+For example, an asset can have:
+
+```text
+P(up) = 0.90
+```
+
+but if it has no valid execution price or is not tradable on the execution day, it should not receive a portfolio weight or order. The entry mask prevents this kind of unrealistic allocation.
 
 ---
 
 #### 3. `Quality Filter`
 
-`Quality Filter` is the signal-strength gate.
+`Quality Filter` is the signal-strength and signal-reliability gate.
 
-After assets pass the entry mask, the notebook applies a DeepLOB-derived quality filter before converting signals into DLS orders. The filter is based on the signal features:
+After assets pass the entry mask, the notebook applies a quality filter based on DeepLOB-derived features. This stage decides whether a tradable asset has a strong enough signal to justify portfolio allocation and possible transaction costs.
+
+The two main features are:
 
 ```text
 signal_score = P(up) - P(down)
@@ -323,30 +409,88 @@ signal_score = P(up) - P(down)
 confidence = |signal_score| × (1 - P(flat))
 ```
 
-An asset is kept only if its confidence and signal score are strong enough according to the configured thresholds. In practical terms, this stage asks:
+The logic is:
 
 ```text
-Is this signal strong enough to justify portfolio allocation and transaction costs?
+signal_score > 0
 ```
 
-This matters because weak signals can create unnecessary turnover. A model may produce many raw predictions, but trading all of them can increase costs and reduce net performance. The quality filter is therefore a transaction-cost-aware defense against noisy trades.
+means the model is more bullish than bearish.
 
-The stage line usually shows:
+```text
+confidence high
+```
+
+means the signal is both directional and not dominated by the flat/no-direction class.
+
+In the notebook configuration, the quality filter keeps assets satisfying:
+
+```text
+confidence >= 0.02
+signal_score >= 0.00
+```
+
+So the filter keeps assets that are at least non-bearish and have enough directional confidence.
+
+This stage answers:
+
+```text
+Among the tradable assets, which ones have a strong enough DeepLOB signal to be considered by DLS?
+```
+
+This is important because trading every raw signal would create excessive turnover and transaction costs. The quality filter reduces noisy activity before the DLS optimizer assigns target weights.
+
+The stage line usually reports:
 
 ```text
 quality_candidates
 pass rate = quality_candidates / entry_candidates
 ```
 
+Where:
+
+| Term                 | Meaning                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| `entry_candidates`   | Assets that passed the entry/tradability mask.                 |
+| `quality_candidates` | Entry candidates that also passed the signal-quality filter.   |
+| `pass rate`          | Fraction of entry candidates that survived the quality filter. |
+
 Interpretation:
 
-* A high pass rate means most eligible signals were strong enough.
-* A low pass rate means the engine rejected many weak or uncertain signals.
-* If the filter becomes too strict and too few names survive, the notebook can fall back to the top-confidence tradable names so that the portfolio remains investable and minimum-holding constraints can still be respected.
+* A high pass rate means most tradable assets had acceptable signal quality.
+* A low pass rate means many tradable assets had weak, flat, or unreliable signals.
+* If too few assets pass the quality filter, the notebook can fall back to top-confidence tradable assets to keep the portfolio investable and satisfy minimum-holding constraints.
 
-This stage explains why a stock with a positive `P(up)` may still receive no DLS allocation.
+This stage explains why a stock can have a positive `P(up)` but still receive no DLS allocation. A positive `P(up)` alone is not enough. The signal must also be strong relative to `P(down)`, not too flat, and pass the configured quality thresholds.
 
----
+For example:
+
+```text
+P(down) = 0.20
+P(flat) = 0.75
+P(up)   = 0.05
+```
+
+This asset is not useful for a long-only allocation because the signal is mostly flat/uncertain and not bullish.
+
+Another example:
+
+```text
+P(down) = 0.30
+P(flat) = 0.35
+P(up)   = 0.35
+```
+
+Here `P(up)` is positive, but the directional edge is very small:
+
+```text
+signal_score = 0.35 - 0.30 = 0.05
+```
+
+If the resulting confidence is too low, the asset may be filtered out.
+
+So the quality filter is the bridge between raw DeepLOB predictions and the DLS optimizer. It makes sure that DLS receives a cleaner, more reliable candidate set instead of the full noisy signal universe.
+
 
 #### 4. `DLS Optimizer`
 
@@ -392,56 +536,208 @@ If many assets pass the quality filter but only a smaller number receive target 
 
 ---
 
+حتماً. این نسخه را می‌توانی جای بخش‌های **Execution**, **Portfolio State** و **How to read the full stage line** در README بگذاری. متن را واضح‌تر کردم و با منطق notebook و dashboard هماهنگ‌تر نوشتم؛ مخصوصاً تفاوت `target weight`, `submitted order`, `filled execution`, و `EOD holding` را روشن‌تر کردم.
+
 #### 5. `Execution`
 
-`Execution` is the trading-action stage.
+`Execution` is the trading-action stage of the pipeline.
 
-The notebook does not stop at target weights. It compares the current portfolio weights with the DLS target weights, then submits buy or sell orders to move the portfolio toward the desired allocation.
+Up to this point, the system has only produced target portfolio weights. However, a target weight is not yet a real trade. The execution stage converts the DLS target portfolio into actual buy and sell actions.
 
-The key logic is:
+The core idea is:
 
 ```text
-target weight - current weight = rebalance gap
+rebalance gap = DLS target weight - current portfolio weight
 ```
+
+For each asset, the engine compares the asset’s current portfolio weight with its new DLS target weight.
 
 Examples:
 
 ```text
 current weight = 2%, target weight = 5%
--> buy approximately 3% more exposure
-
-current weight = 6%, target weight = 1%
--> sell approximately 5% exposure
-
-current weight > 0%, target weight = 0%
--> reduce or close the position
+-> the engine needs to increase exposure
+-> BUY approximately 3% more portfolio weight
 ```
 
-Execution is also constrained by realistic trading mechanics:
+```text
+current weight = 6%, target weight = 1%
+-> the engine needs to reduce exposure
+-> SELL approximately 5% portfolio weight
+```
 
-* available cash
-* cash buffer
-* lot size
-* sellable shares
-* transaction costs
-* commissions
-* stamp duty
-* locked shares
-* execution price availability
+```text
+current weight = 3%, target weight = 0%
+-> the asset is no longer desired by DLS
+-> SELL or close the position
+```
 
-The notebook uses open-based execution logic for the DLS strategy. Sells use the configured sell mode, which is set to open by default in this version, and rebalance sizing uses the decision/open price. Same-day close is reserved for end-of-day valuation and logging, not for same-day execution sizing.
+This means that `SELL` in this project does **not** necessarily mean that DeepLOB is bearish. It usually means:
 
-This stage reports how many assets were actually executed, separated into buys and sells.
+```text
+The asset was already held,
+but its new DLS target weight is lower than its previous/current weight.
+```
 
-Important distinction:
+So an asset can have a high `P(up)` and still be sold if the portfolio already holds more of that asset than the new target allocation requires.
+
+---
+
+##### Target weight vs submitted order vs filled execution
+
+This stage is easier to understand if these three concepts are separated:
+
+| Concept              | Meaning                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| `DLS target weight`  | The portfolio weight the optimizer wants after rebalancing.                              |
+| `Submitted order %`  | The buy/sell percentage the strategy sends to the execution engine.                      |
+| `Filled execution %` | The part of the submitted order that is actually executed after constraints are applied. |
+
+So the chain is:
+
+```text
+DLS target weight
+    -> rebalance gap
+    -> submitted buy/sell order
+    -> filled buy/sell execution
+```
+
+A submitted order is the strategy’s intention. A filled execution is what actually happened.
+
+Therefore:
 
 ```text
 submitted order ≠ filled execution
 ```
 
-A submitted order percentage says what the strategy tried to buy or sell. A filled execution shows what actually happened after applying price, cash, lot-size, sellability, and cost constraints.
+For example:
 
-This stage answers:
+```text
+DLS submitted buy % = 2.0%
+Filled buy %        = 1.5%
+```
+
+means the strategy attempted to buy 2.0% portfolio exposure, but only 1.5% was actually filled.
+
+Or:
+
+```text
+DLS submitted sell % = 1.0%
+Filled sell %        = 0.0%
+```
+
+means a sell order was submitted, but the trade audit did not record a filled sell execution for that asset.
+
+---
+
+##### Execution constraints
+
+The notebook simulates realistic trading mechanics. Even if the target weight says the portfolio should buy or sell an asset, the execution engine may reduce, skip, or modify the trade because of practical constraints.
+
+The main execution constraints include:
+
+| Constraint                     | Meaning                                                                     |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| `available cash`               | The portfolio must have enough cash to buy shares.                          |
+| `cash buffer`                  | A fixed part of capital is kept as cash and not fully invested.             |
+| `lot size`                     | Orders must respect minimum share-lot rules.                                |
+| `sellable shares`              | The strategy can only sell shares that are available to sell.               |
+| `locked shares`                | Some shares may not be sellable immediately.                                |
+| `transaction costs`            | Commissions and taxes reduce net value.                                     |
+| `commission`                   | Fee paid on executed trades.                                                |
+| `stamp duty`                   | Additional sell-side tax/cost.                                              |
+| `execution price availability` | Trades require valid execution prices.                                      |
+| `rebalance band`               | Very small weight differences may be ignored to avoid unnecessary turnover. |
+
+The execution stage therefore answers:
+
+```text
+After portfolio targets and real trading constraints, what did the strategy actually trade?
+```
+
+---
+
+##### Buy and sell interpretation
+
+A `BUY` action usually means:
+
+```text
+DLS target weight > previous/current weight
+```
+
+and the difference is large enough to justify a rebalance.
+
+A `SELL` action usually means:
+
+```text
+DLS target weight < previous/current weight
+```
+
+and the position must be reduced.
+
+A `HOLD` action usually means one of the following:
+
+```text
+target weight is close to current weight
+the rebalance gap is too small
+the order is blocked by constraints
+the asset does not need a trade
+```
+
+The dashboard’s execution tables make this visible through columns such as:
+
+```text
+Previous weight
+DLS predicted target weight
+Post-trade weight
+Final EOD weight
+DLS submitted buy %
+DLS submitted sell %
+Filled buy %
+Filled sell %
+Filled buy shares
+Filled sell shares
+Buy turnover
+Sell turnover
+Buy cost
+Sell cost
+```
+
+These columns should be read together. The action label alone is not enough to explain the trade; the weight transition explains why the action happened.
+
+---
+
+##### Open-based execution convention
+
+In this notebook version, DLS execution uses an open-based trading convention. The rebalance decision is applied using execution prices available at the trading stage, while the same-day close is used later for valuation and logging.
+
+In practical terms:
+
+```text
+open / decision price -> used for execution sizing
+close price           -> used for end-of-day valuation
+```
+
+This avoids using end-of-day information to size trades that should have been decided before the close.
+
+---
+
+##### What the Execution stage reports
+
+The `Execution` box in the stage line reports how many assets were actually executed on the selected replay day. It separates executed activity into buys and sells.
+
+This is different from the number of target names.
+
+For example:
+
+```text
+DLS Optimizer = 240 target names
+Execution     = 35 executed assets
+```
+
+This means DLS wanted a portfolio with 240 positive-weight assets, but only 35 assets needed actual trading on that day. The rest may already have been close to target weight or may not have required a rebalance.
+
+So this stage answers:
 
 ```text
 What did the strategy actually trade today?
@@ -451,43 +747,129 @@ What did the strategy actually trade today?
 
 #### 6. `Portfolio State`
 
-`Portfolio State` is the end-of-day result of the trading step.
+`Portfolio State` is the final end-of-day state of the DLS portfolio after the trading step.
 
-After the execution engine updates cash and holdings, the portfolio is valued using end-of-day prices. The dashboard then reports the final holdings and concentration state for the selected replay day.
+After the execution engine updates cash and holdings, the notebook values the portfolio using end-of-day prices. The dashboard then shows the final holdings, weights, concentration, and portfolio state for the selected replay day.
 
-This stage is built from the DLS holding snapshot and represents the final portfolio after:
+This stage represents the result of the full chain:
 
 ```text
-signals
-    -> filters
-    -> target weights
+DeepLOB signals
+    -> entry mask
+    -> quality filter
+    -> DLS target weights
     -> submitted orders
     -> filled executions
+    -> updated holdings
     -> EOD valuation
 ```
 
-The main value is the number of active end-of-day holdings. The subtitle usually reports top-10 concentration, which shows how much of the portfolio is held in the ten largest positions.
+The main number in the `Portfolio State` box is the number of active end-of-day holdings. In other words, it shows how many assets remain in the DLS portfolio after the day’s trades and valuation.
 
-Interpretation:
+The subtitle usually reports top-10 concentration:
 
-* More holdings usually means broader diversification.
-* Fewer holdings means a more concentrated portfolio.
-* A high top-10 weight means exposure is concentrated in the largest positions.
-* A lower top-10 weight means exposure is more evenly distributed.
+```text
+top-10 concentration = sum of the 10 largest EOD portfolio weights
+```
+
+This tells how concentrated the portfolio is in its largest positions.
+
+---
+
+##### Important portfolio-state columns
+
+The portfolio state is explained by the holding snapshot and related dashboard columns:
+
+| Column                            | Meaning                                               |
+| --------------------------------- | ----------------------------------------------------- |
+| `shares`                          | Number of shares held at the end of the day.          |
+| `close_price`                     | Closing price used for EOD valuation.                 |
+| `market_value`                    | End-of-day value of the position.                     |
+| `Final EOD weight` / `eod_weight` | Final portfolio weight of the asset after valuation.  |
+| `EOD holdings`                    | Number of active assets with positive final holdings. |
+| `Top-10 weight`                   | Total weight of the ten largest holdings.             |
+
+The portfolio state is not just a list of trades. It is the final result after all trades have affected cash, holdings, and valuation.
+
+---
+
+##### How to interpret holdings and concentration
+
+A larger number of holdings usually means the DLS portfolio is more diversified.
+
+A smaller number of holdings usually means the portfolio is more selective or concentrated.
+
+A high top-10 concentration means a large part of the portfolio is allocated to the ten largest positions. This can indicate stronger conviction, but it can also increase concentration risk.
+
+A lower top-10 concentration means the portfolio is more evenly distributed across assets.
+
+Examples:
+
+```text
+EOD holdings = 300
+Top-10 weight = 12%
+```
+
+This suggests a broad portfolio with relatively low concentration.
+
+```text
+EOD holdings = 80
+Top-10 weight = 45%
+```
+
+This suggests a much more concentrated portfolio.
+
+---
+
+##### Portfolio value and DLS Equity Proxy
+
+The dashboard reconstructs the DLS portfolio value path from the exported holdings and target gross exposure. The raw DLS equity proxy is:
+
+```text
+dls_equity_proxy_raw = eod_market_value / engine_target_gross
+```
+
+In the latest dashboard version, the DLS equity path is normalized so that the first valid DLS replay value starts from:
+
+```text
+RMB 50,000,000
+```
+
+This makes the dashboard visually consistent with the notebook’s initial capital assumption and allows a clearer comparison against the Base DeepLOB portfolio path.
+
+So the displayed DLS equity proxy is:
+
+```text
+dls_equity_proxy = normalized version of dls_equity_proxy_raw
+```
+
+This normalization does not change the return path shape. It only rescales the level of the DLS equity curve to start from the same initial capital.
+
+---
+
+##### What the Portfolio State stage answers
 
 This stage answers:
 
 ```text
-What does the portfolio look like after the day’s trading decisions?
+What does the portfolio look like after the day’s decisions have been executed and valued?
 ```
 
-It is the final state of the replay step, not just a chart of orders.
+It helps diagnose whether DLS is producing:
+
+* a diversified portfolio,
+* a concentrated portfolio,
+* stable holdings,
+* aggressive rebalancing,
+* or a portfolio that frequently changes its composition.
+
+The final state is especially useful when compared with the previous stages. For example, a day may have many raw signals and many target names, but the final portfolio may still remain stable if most target weights are close to existing holdings.
 
 ---
 
 ### How to read the full stage line
 
-The stage line should be interpreted as a decision funnel:
+The stage line should be interpreted as a decision funnel and state transition:
 
 ```text
 Raw DeepLOB signal universe
@@ -498,24 +880,92 @@ Raw DeepLOB signal universe
     -> final EOD holdings
 ```
 
-A useful diagnostic reading is:
+Each transition explains a different part of the strategy.
 
-| Transition                          | What it tells you                                                   |
-| ----------------------------------- | ------------------------------------------------------------------- |
-| `Signal Bus -> Entry Mask`        | How many raw signals were actually eligible for execution.          |
-| `Entry Mask -> Quality Filter`    | How much noisy or weak signal activity was removed.                 |
-| `Quality Filter -> DLS Optimizer` | How selective the portfolio optimizer was after filtering.          |
-| `DLS Optimizer -> Execution`      | Whether target weights translated into actual trades.               |
-| `Execution -> Portfolio State`    | How the day’s trades changed the final holdings and concentration. |
+| Transition                        | What it tells you                                                                              |
+| --------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `Signal Bus -> Entry Mask`        | How many DeepLOB signal rows were actually tradable or eligible for the execution day.         |
+| `Entry Mask -> Quality Filter`    | How many tradable assets had strong enough DeepLOB-derived signal quality.                     |
+| `Quality Filter -> DLS Optimizer` | How selective the optimizer was when converting filtered signals into positive target weights. |
+| `DLS Optimizer -> Execution`      | Whether target weights required real buy/sell trades after comparing with existing holdings.   |
+| `Execution -> Portfolio State`    | How the filled trades changed final holdings, exposure, and concentration.                     |
 
-For example:
+---
 
-* If `Signal Bus` is high but `Quality Filter` is low, DeepLOB produced many raw signals, but most were not strong enough.
-* If `Quality Filter` is high but `DLS Optimizer` is low, the optimizer chose to concentrate capital in only a subset of good signals.
-* If `DLS Optimizer` is high but `Execution` is low, the portfolio may already be close to target weights, or execution constraints may have prevented many trades.
-* If `Execution` is high but `Portfolio State` changes only slightly, trades may have been small rebalancing adjustments rather than large position changes.
+#### Diagnostic examples
 
-In short, the stage line is a compressed explanation of the complete DeepLOB + DLS trading path. It shows how the notebook moves from model probabilities to a filtered allocation, then from target weights to real trades, and finally from trades to the end-of-day portfolio.
+If `Signal Bus` is high but `Entry Mask` is low:
+
+```text
+DeepLOB produced many predictions, but many assets were not tradable or did not have valid entry data.
+```
+
+If `Entry Mask` is high but `Quality Filter` is low:
+
+```text
+Many assets were tradable, but most signals were too weak, too flat, or not sufficiently bullish.
+```
+
+If `Quality Filter` is high but `DLS Optimizer` is lower:
+
+```text
+Many assets passed the signal filter, but the optimizer selected a smaller subset for positive portfolio weights.
+```
+
+If `DLS Optimizer` is high but `Execution` is low:
+
+```text
+The target portfolio may be broad, but most current holdings were already close to target weights,
+or the rebalance gap was too small to justify trading.
+```
+
+If `Execution` is high but `Portfolio State` changes only slightly:
+
+```text
+The strategy performed many small rebalance trades rather than large position changes.
+```
+
+If an asset has high `P(up)` but `Engine action = SELL`:
+
+```text
+This does not necessarily mean the model became bearish.
+It usually means the asset was already overweight relative to its new DLS target weight.
+```
+
+If an asset has low `P(down)` but is sold:
+
+```text
+The sell action is probably a portfolio rebalancing action,
+not a short-selling or bearish-signal action.
+```
+
+---
+
+#### Final interpretation
+
+The stage line is a compressed explanation of the full DeepLOB + DLS trading path.
+
+It shows how the system moves through these questions:
+
+```text
+1. What did DeepLOB predict?
+2. Which predicted assets were actually tradable?
+3. Which tradable signals were strong enough?
+4. Which assets received DLS portfolio weights?
+5. Which target-weight changes became real trades?
+6. What did the final end-of-day portfolio look like?
+```
+
+In short:
+
+```text
+Prediction does not equal allocation.
+Allocation does not equal submitted order.
+Submitted order does not equal filled execution.
+Filled execution does not equal final EOD weight.
+```
+
+The dashboard stage line exists to make each of these differences visible day by day.
 
 # 9. App views / tabs
 
