@@ -1497,6 +1497,593 @@ Relevant columns:
 
 ---
 
+## When Does the Strategy Buy or Sell?
+
+This section explains how buy and sell actions are generated in the DeepLOB + DLS trading engine. The most important point is that the DLS strategy does **not** buy or sell directly from `P(up)` or `P(down)`. DeepLOB first produces probabilities, DLS converts those probabilities into target portfolio weights, and the execution engine then compares the target weights with the current portfolio holdings.
+
+The decision chain is:
+
+```text
+DeepLOB probabilities
+    -> signal_score and confidence
+    -> entry mask
+    -> quality filter
+    -> DLS target weights
+    -> rebalance gap
+    -> submitted buy/sell orders
+    -> filled executions
+    -> updated EOD portfolio
+```
+
+So in this project:
+
+```text
+DeepLOB predicts direction.
+DLS decides target allocation.
+The execution engine decides the actual buy/sell trades.
+```
+
+---
+
+### 1. DeepLOB probabilities are not direct orders
+
+For each asset, DeepLOB produces a three-class probability vector:
+
+```text
+P(down), P(flat), P(up)
+```
+
+The notebook then derives:
+
+```text
+signal_score = P(up) - P(down)
+
+confidence = |signal_score| × (1 - P(flat))
+```
+
+These values describe the signal quality and direction. However, they are **not** themselves trading orders.
+
+For example:
+
+```text
+P(up) = 0.95
+```
+
+does not automatically mean the strategy will buy the asset.
+
+Similarly:
+
+```text
+P(down) = 0.90
+```
+
+does not automatically mean the DLS strategy will short the asset.
+
+The DLS strategy is long-only in this implementation. It produces non-negative target weights:
+
+```text
+target_weight_i >= 0
+```
+
+Therefore, a `SELL` action means reducing or closing an existing long position. It does **not** mean opening a short position.
+
+---
+
+### 2. The quality filter controls allocation eligibility, not sell permission
+
+The quality filter is mainly an entry/allocation filter. It determines which tradable assets are eligible to receive new or increased DLS target weights.
+
+The configured signal-quality logic is based on:
+
+```text
+confidence >= threshold
+signal_score >= threshold
+```
+
+In the notebook configuration, this is:
+
+```text
+confidence >= 0.02
+signal_score >= 0.00
+```
+
+This means the quality filter keeps assets that are at least non-bearish and have enough directional confidence.
+
+However, the quality filter should not be interpreted as a restriction on selling existing positions.
+
+A useful rule is:
+
+```text
+BUY decisions require signal quality.
+SELL decisions require an existing position and a lower target weight.
+```
+
+For example, this situation is valid:
+
+```text
+quality_candidate = False
+previous_weight > 0
+target_weight = 0
+Engine action = SELL
+```
+
+This means the asset is no longer selected for allocation, so the existing position can be reduced or closed. The sell action is a portfolio deallocation/rebalancing decision, not necessarily a bearish DeepLOB prediction.
+
+---
+
+### 3. DLS target weights are the bridge between signals and trades
+
+After entry and quality filtering, the DLS model produces a target portfolio weight for each selected asset.
+
+Conceptually:
+
+```text
+DLS target weight = desired portfolio exposure after rebalancing
+```
+
+An asset can receive:
+
+```text
+target_weight > 0
+```
+
+if DLS wants to hold it in the portfolio.
+
+An asset can receive:
+
+```text
+target_weight = 0
+```
+
+if DLS does not want to hold it.
+
+The execution engine does not simply buy every positive signal. Instead, it compares the new target weight with the current portfolio weight.
+
+The key quantity is:
+
+```text
+rebalance gap = target_weight - current_weight
+```
+
+This gap determines whether the portfolio needs to buy, sell, or hold.
+
+---
+
+### 4. When does a BUY happen?
+
+A `BUY` happens when the DLS target weight is higher than the current portfolio weight by more than the rebalance band.
+
+The simplified rule is:
+
+```text
+BUY if:
+
+target_weight_i - current_weight_i > rebalance_band
+```
+
+In words:
+
+```text
+The strategy buys asset i when DLS wants a larger exposure than the portfolio currently holds.
+```
+
+Example:
+
+```text
+current_weight = 2.0%
+target_weight  = 5.0%
+rebalance gap  = +3.0%
+```
+
+The portfolio is underweight relative to the DLS target, so the execution engine attempts to buy more exposure.
+
+A buy can also happen when the asset is not currently held:
+
+```text
+current_weight = 0.0%
+target_weight  = 1.5%
+```
+
+In this case, the strategy is opening a new long position.
+
+---
+
+### 5. Additional BUY constraints
+
+Even if the target weight is higher than the current weight, a buy order may be reduced or skipped because the execution engine applies realistic trading constraints.
+
+The main buy-side constraints are:
+
+| Constraint | Meaning |
+| ---------- | ------- |
+| `entry mask` | The asset must be tradable and have valid entry information. |
+| `quality filter` | The signal must be strong enough to receive allocation. |
+| `rebalance band` | Very small weight gaps are ignored to reduce unnecessary turnover. |
+| `available cash` | The portfolio must have enough cash to buy shares. |
+| `cash buffer` | A fixed part of the portfolio is kept as cash. |
+| `lot size` | The order must respect minimum share-lot rules. |
+| `minimum target weight` | Very small target weights may be ignored. |
+| `valid buy price` | The execution price must be finite and positive. |
+| `transaction costs` | Commission and costs reduce available buying power. |
+
+So the practical buy logic is closer to:
+
+```text
+BUY if:
+    target_weight_i > current_weight_i + rebalance_band
+    and asset passes entry / allocation requirements
+    and target_weight_i is large enough
+    and valid execution price exists
+    and enough cash is available
+    and the final share quantity respects lot size
+```
+
+A positive DeepLOB signal does not guarantee a buy. The asset must survive the allocation and execution pipeline.
+
+---
+
+### 6. When does a SELL happen?
+
+A `SELL` happens when the current portfolio weight is higher than the new DLS target weight by more than the rebalance band.
+
+The simplified rule is:
+
+```text
+SELL if:
+
+current_weight_i - target_weight_i > rebalance_band
+```
+
+In words:
+
+```text
+The strategy sells asset i when the portfolio currently holds more of the asset than DLS now wants.
+```
+
+Example:
+
+```text
+current_weight = 6.0%
+target_weight  = 1.0%
+rebalance gap  = -5.0%
+```
+
+The portfolio is overweight relative to the DLS target, so the execution engine attempts to sell part of the position.
+
+Another example:
+
+```text
+current_weight = 3.0%
+target_weight  = 0.0%
+```
+
+This means DLS no longer wants the asset in the target portfolio. The execution engine may sell or close the position.
+
+---
+
+### 7. Additional SELL constraints
+
+A sell order may also be reduced or skipped because of realistic trading constraints.
+
+The main sell-side constraints are:
+
+| Constraint | Meaning |
+| ---------- | ------- |
+| `existing holdings` | The asset must already be held. |
+| `sellable shares` | Only shares that are available to sell can be sold. |
+| `locked shares` | Some recently bought shares may not be sellable immediately. |
+| `rebalance band` | Very small overweight gaps are ignored. |
+| `lot size` | Sell quantity must respect minimum share-lot rules. |
+| `minimum holdings` | The engine may avoid fully exiting too many names if minimum holdings would be violated. |
+| `valid sell price` | The sell execution price must be finite and positive. |
+| `transaction costs` | Commission and stamp duty are charged on executed sells. |
+
+So the practical sell logic is closer to:
+
+```text
+SELL if:
+    current_weight_i > target_weight_i + rebalance_band
+    and the asset is currently held
+    and sellable shares are available
+    and valid sell price exists
+    and the final share quantity respects lot size
+    and minimum-holding constraints are not violated
+```
+
+The important distinction is that selling is based on reducing an existing long exposure. It does not require `P(down)` to be high.
+
+---
+
+### 8. Why can an asset with high `P(up)` still be sold?
+
+This can happen and it is not necessarily a bug.
+
+Suppose DeepLOB is very bullish:
+
+```text
+P(down) = 0.01
+P(flat) = 0.04
+P(up)   = 0.95
+```
+
+But the portfolio already holds too much of this asset:
+
+```text
+current_weight = 5.0%
+target_weight  = 2.0%
+```
+
+Then:
+
+```text
+current_weight - target_weight = 3.0%
+```
+
+If this is larger than the rebalance band, the execution engine may sell part of the position.
+
+This does not mean DeepLOB became bearish. It means:
+
+```text
+The asset is still attractive, but the current position is too large relative to the new DLS target weight.
+```
+
+So:
+
+```text
+High P(up) can coexist with SELL.
+```
+
+The correct interpretation is:
+
+```text
+P(up) explains the signal.
+target_weight explains the desired allocation.
+current_weight vs target_weight explains the trade action.
+```
+
+---
+
+### 9. Why can an asset with low `P(down)` still be sold?
+
+A low `P(down)` only means the model does not strongly expect a downward move. It does not mean the portfolio must continue holding the same amount of that asset.
+
+An asset can be sold even with low `P(down)` if:
+
+```text
+current_weight > target_weight
+```
+
+This can happen because:
+
+```text
+DLS reduced the asset's target weight.
+Other assets became more attractive.
+The asset failed the current quality/allocation filter.
+The portfolio needs rebalancing.
+The strategy needs to free cash.
+The current position became overweight after price movement.
+```
+
+Therefore:
+
+```text
+Low P(down) does not block SELL.
+```
+
+Sell is primarily a portfolio-weight adjustment.
+
+---
+
+### 10. Why does the engine sell before buying?
+
+In the replay engine, sell actions are processed before buy actions.
+
+The reason is practical:
+
+```text
+Sells free cash.
+Then buys use the updated cash balance.
+```
+
+The daily sequence is:
+
+```text
+1. Load current holdings and cash.
+2. Load DLS target weights for the selected trade day.
+3. Compute current weights using the decision/execution price.
+4. Identify overweight positions:
+       current_weight > target_weight + rebalance_band
+5. Execute sells first.
+6. Update cash and holdings.
+7. Recompute current weights after sells.
+8. Identify underweight positions:
+       target_weight > current_weight + rebalance_band
+9. Execute buys using available cash after cash buffer.
+10. Update holdings, cash, costs, and audit tables.
+11. Value the final portfolio at end-of-day close.
+```
+
+This order makes the execution more realistic because the strategy does not assume unlimited cash before selling overweight positions.
+
+---
+
+### 11. Submitted order vs filled execution
+
+The dashboard separates the order the strategy wanted from the trade that actually happened.
+
+```text
+Submitted order = intended buy/sell percentage
+Filled execution = actual trade after constraints
+```
+
+For example:
+
+```text
+DLS submitted buy % = 2.0%
+Filled buy %        = 1.4%
+```
+
+This means the strategy wanted to buy 2.0% exposure, but only 1.4% was actually executed.
+
+Another example:
+
+```text
+DLS submitted sell % = 1.0%
+Filled sell %        = 0.0%
+```
+
+This means the strategy attempted to sell, but the trade was not filled because of sellability, lot size, price, or other execution constraints.
+
+Therefore:
+
+```text
+Target weight does not always become a submitted order.
+Submitted order does not always become a filled execution.
+Filled execution does not always exactly match the target weight.
+```
+
+---
+
+### 12. Practical interpretation in the dashboard
+
+When inspecting one asset in the dashboard, the action should be explained by reading these columns together:
+
+```text
+P(down)
+P(flat)
+P(up)
+signal_score
+confidence
+entry_candidate
+quality_candidate
+Previous weight
+DLS predicted target weight
+Post-trade weight
+Final EOD weight
+DLS submitted buy %
+DLS submitted sell %
+Filled buy %
+Filled sell %
+Filled buy shares
+Filled sell shares
+Buy turnover
+Sell turnover
+Buy cost
+Sell cost
+Engine action
+```
+
+The most important diagnostic comparison is:
+
+```text
+Previous weight vs DLS predicted target weight
+```
+
+Interpretation:
+
+```text
+target_weight > previous_weight
+    -> buy / increase exposure
+
+target_weight < previous_weight
+    -> sell / reduce exposure
+
+target_weight approximately equal to previous_weight
+    -> hold / no meaningful rebalance
+```
+
+The DeepLOB probabilities explain why an asset was considered by the model. The weight transition explains why the execution engine bought or sold it.
+
+---
+
+### 13. DLS vs Original DeepLOB-only baseline
+
+The buy/sell logic of the DLS strategy is different from the original DeepLOB-only baseline.
+
+In the original DeepLOB-only baseline, orders are more directly tied to classification signals:
+
+```text
+High P(up) / bullish signal
+    -> buy candidate
+
+High P(down) / bearish signal
+    -> sell candidate
+
+Flat signal
+    -> partial reduction or no aggressive buy
+```
+
+In the DeepLOB + DLS strategy, the process is different:
+
+```text
+DeepLOB probabilities
+    -> DLS target weights
+    -> current weight vs target weight
+    -> buy/sell execution
+```
+
+So:
+
+```text
+Original DeepLOB-only:
+    buy/sell is probability-signal driven.
+
+DeepLOB + DLS:
+    buy/sell is target-weight and rebalance-gap driven.
+```
+
+This is why DLS can sell an asset even when `P(up)` is high, and it can hold or buy an asset even when the signal is only moderately bullish, as long as the final portfolio optimization assigns it a positive target weight.
+
+---
+
+### 14. Final rule of thumb
+
+The simplest way to understand the DLS execution logic is:
+
+```text
+BUY:
+DLS wants more exposure than the portfolio currently has.
+
+SELL:
+DLS wants less exposure than the portfolio currently has.
+
+HOLD:
+The current exposure is already close enough to the DLS target,
+or execution constraints prevent a trade.
+```
+
+More formally:
+
+```text
+BUY if:
+target_weight_i - current_weight_i > rebalance_band
+```
+
+```text
+SELL if:
+current_weight_i - target_weight_i > rebalance_band
+```
+
+```text
+HOLD if:
+|target_weight_i - current_weight_i| <= rebalance_band
+```
+
+subject to:
+
+```text
+cash, lot size, sellability, locked shares, transaction costs,
+minimum holdings, valid prices, and execution constraints.
+```
+
+In short:
+
+```text
+Prediction does not equal trade.
+Target weight does not equal filled execution.
+BUY/SELL is decided by the gap between current weight and DLS target weight.
+
+
 ## 10. Understanding the two strategies
 
 ### Base DeepLOB
